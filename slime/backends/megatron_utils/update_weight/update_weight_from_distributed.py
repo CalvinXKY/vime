@@ -296,20 +296,33 @@ class UpdateWeightFromDistributed:
 
         use_vllm_packed = self._use_vllm_packed()
         if use_vllm_packed and self._is_pp_src_rank:
-            logger.info("Using vLLM packed weight sync (one-shot metadata + trainer_send_weights)")
+            logger.info(
+                "Using vLLM packed weight sync (bucketed; metadata + trainer_send_weights per bucket)"
+            )
 
         if use_vllm_packed:
+            buffer_size = 0
             converted_named_tensors: list[tuple[str, torch.Tensor]] = []
+            pbar = (
+                tqdm(desc=f"[{self._group_name}] Update weights (vLLM packed)", total=0)
+                if self._is_pp_src_rank
+                else None
+            )
             for name, param in named_params_and_buffers(self.args, self.model):
                 if ".experts." in name:
                     continue
-                param = all_gather_param(name, param)
-                if self._is_pp_src_rank:
-                    converted_named_tensors += convert_to_hf(
-                        self.args, self.model_name, name, param, self.quantization_config
-                    )
+                buffer_size = self._update_weight_from_distributed(
+                    name,
+                    param,
+                    converted_named_tensors,
+                    buffer_size,
+                    pbar=pbar,
+                    flush_packed=True,
+                )
             if converted_named_tensors and self._is_pp_src_rank:
                 self._update_weights_vllm_packed(converted_named_tensors)
+                if pbar is not None:
+                    pbar.update(1)
         else:
             buffer_size = 0
             converted_named_tensors = []
@@ -391,6 +404,8 @@ class UpdateWeightFromDistributed:
         converted_named_tensors: list[tuple[str, torch.Tensor]],
         buffer_size: int,
         pbar: tqdm | None = None,
+        *,
+        flush_packed: bool = False,
     ) -> int | None:
         """
         Non-expert: gather TP → rm pad → HF → buffer (flush if full). All gather, PP source buffers.
@@ -402,7 +417,14 @@ class UpdateWeightFromDistributed:
 
         param_size = param.numel() * param.element_size()
         if buffer_size + param_size > self.args.update_weight_buffer_size:
-            self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
+            if converted_named_tensors:
+                if flush_packed:
+                    self._update_weights_vllm_packed(converted_named_tensors)
+                    converted_named_tensors.clear()
+                    if pbar is not None:
+                        pbar.update(1)
+                else:
+                    self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
             buffer_size = 0
         converted_named_tensors += convert_to_hf(self.args, self.model_name, name, param, self.quantization_config)
         buffer_size += param_size

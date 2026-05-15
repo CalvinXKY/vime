@@ -167,6 +167,7 @@ class ServerGroup:
                 rank=global_rank,
                 worker_type=self.worker_type,
                 base_gpu_id=base_gpu_id,
+                model_path=self.model_path,
                 sglang_overrides=self.sglang_overrides,
                 num_gpus_per_engine=self.num_gpus_per_engine,
             )
@@ -1007,7 +1008,7 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
 
     logger.info("Launch HTTP router (impl=%s) with args: %s", impl, router_args)
 
-    process = multiprocessing.Process(
+    process = multiprocessing.get_context("spawn").Process(
         target=run_router,
         args=((impl, router_args),),
     )

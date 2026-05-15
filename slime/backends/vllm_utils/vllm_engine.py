@@ -7,12 +7,27 @@ import os
 import time
 
 import requests
-from urllib3.exceptions import NewConnectionError
+from urllib.parse import quote
 
 from slime.ray.ray_actor import RayActor
 from slime.utils.http_utils import get_host_info
 
 logger = logging.getLogger(__name__)
+
+_spawn_ctx = multiprocessing.get_context("spawn")
+
+# vLLM sleep/wake only supports these tags (SGLang also uses ``cuda_graph``, which must be dropped).
+_VLLM_WAKE_TAGS = frozenset({"weights", "kv_cache"})
+
+
+def _normalize_vllm_wake_tags(tags: list[str] | None) -> list[str] | None:
+    if not tags:
+        return tags
+    normalized = [t for t in tags if t in _VLLM_WAKE_TAGS]
+    dropped = set(tags) - set(normalized)
+    if dropped:
+        logger.debug("vLLM wake_up: dropped tags not supported by vLLM: %s", sorted(dropped))
+    return normalized or None
 
 
 def get_base_gpu_id(args, rank):
@@ -67,6 +82,7 @@ def launch_server_process(
     args,
     rank: int,
     visible_devices: str,
+    model_path: str,
 ) -> multiprocessing.Process:
     """Spawn ``vllm serve`` (OpenAI API server) in a subprocess.
 
@@ -74,13 +90,12 @@ def launch_server_process(
     """
     env = os.environ.copy()
     env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-    env.setdefault("NCCL_IB_DISABLE", "1")
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     env["CUDA_VISIBLE_DEVICES"] = visible_devices
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
 
     host_for_subprocess = bind_host.strip("[]")
-    model = getattr(args, "vllm_model", None) or args.hf_checkpoint
+    model = getattr(args, "vllm_model", None) or model_path
     tp = args.rollout_num_gpus_per_engine
     seed = getattr(args, "seed", 1234) + rank
 
@@ -115,8 +130,7 @@ def launch_server_process(
 
     logger.info("Launching vLLM server: %s", " ".join(cmd))
 
-    multiprocessing.set_start_method("spawn", force=True)
-    p = multiprocessing.Process(target=_exec_vllm_cmd, args=(cmd, env))
+    p = _spawn_ctx.Process(target=_exec_vllm_cmd, args=(cmd, env))
     p.start()
     return p
 
@@ -148,6 +162,7 @@ class VLLMEngine(RayActor):
         rank: int,
         worker_type: str = "regular",
         base_gpu_id: int | None = None,
+        model_path: str | None = None,
         sglang_overrides: dict | None = None,
         num_gpus_per_engine: int | None = None,
     ):
@@ -155,6 +170,7 @@ class VLLMEngine(RayActor):
         self.rank = rank
         self.worker_type = worker_type
         self.base_gpu_id = base_gpu_id
+        self.model_path = model_path or args.hf_checkpoint
         # Uniform Ray ``start_engines`` kwargs; unused when launching vLLM over HTTP.
         self.sglang_overrides = sglang_overrides or {}
         self.num_gpus_per_engine = num_gpus_per_engine
@@ -206,15 +222,6 @@ class VLLMEngine(RayActor):
 
     def _register_worker_with_router(self) -> None:
         worker_url = self._http_base()
-        if self.args.use_slime_router:
-            response = requests.post(
-                f"http://{self.router_ip}:{self.router_port}/add_worker",
-                params={"url": worker_url},
-                timeout=30,
-            )
-            response.raise_for_status()
-            return
-
         payload = {"url": worker_url, "worker_type": self.worker_type}
         response = requests.post(
             f"http://{self.router_ip}:{self.router_port}/workers",
@@ -223,6 +230,26 @@ class VLLMEngine(RayActor):
         )
         response.raise_for_status()
 
+    def _deregister_worker_from_router(self) -> None:
+        if self.node_rank != 0 or not self.router_ip or not self.router_port:
+            return
+        worker_url = self._http_base()
+        try:
+            all_workers = requests.get(
+                f"http://{self.router_ip}:{self.router_port}/workers", timeout=30
+            ).json()["workers"]
+            for worker in all_workers:
+                if worker["url"] == worker_url:
+                    response = requests.delete(
+                        f"http://{self.router_ip}:{self.router_port}/workers/{quote(worker_url, safe='')}",
+                        timeout=30,
+                    )
+                    response.raise_for_status()
+                    return
+            logger.warning("Worker %s not found in vllm-router during shutdown.", worker_url)
+        except Exception as e:
+            logger.warning("Failed to list/remove worker on vllm-router: %s", e)
+
     def _init_external(self) -> None:
         logger.info("Use external vLLM engine (rank=%s) at %s:%s", self.rank, self.server_host, self.server_port)
         base = self._http_base()
@@ -230,8 +257,7 @@ class VLLMEngine(RayActor):
         self._wait_external_config_ready()
 
     def _wait_external_config_ready(self) -> None:
-        """External engine: best-effort ``GET /server_info`` to validate a small expected field set."""
-        expect = self._expect_server_fields_for_external()
+        """External engine: best-effort ``GET /server_info`` TP check (non-fatal)."""
         try:
             # SGLang external mode uses ``/get_server_info``; vLLM exposes ``/server_info``.
             actual = requests.get(f"{self._http_base()}/server_info", params={"config_format": "json"}, timeout=30)
@@ -241,23 +267,15 @@ class VLLMEngine(RayActor):
             logger.warning("External vLLM: could not GET /server_info (non-fatal): %s", e)
             return
 
-        for name, expect_value in expect.items():
-            if name not in body and name != "tensor_parallel_size":
-                continue
-            actual_value = body.get(name)
-            if actual_value != expect_value and expect_value is not None:
-                logger.warning(
-                    "External vLLM server_info mismatch for %s: expect=%s actual=%s (weak check; server may omit fields)",
-                    name,
-                    expect_value,
-                    actual_value,
-                )
-
-    def _expect_server_fields_for_external(self) -> dict:
-        """Fields to compare against ``/server_info`` when ``rollout_external`` is enabled."""
-        return {
-            "tensor_parallel_size": self.args.rollout_num_gpus_per_engine,
-        }
+        expect_tp = self.args.rollout_num_gpus_per_engine
+        parallel_cfg = body.get("vllm_config", {}).get("parallel_config", {})
+        actual_tp = parallel_cfg.get("tensor_parallel_size")
+        if actual_tp is not None and actual_tp != expect_tp:
+            logger.warning(
+                "External vLLM server_info TP mismatch: expect=%s actual=%s (weak check)",
+                expect_tp,
+                actual_tp,
+            )
 
     def _init_normal(self) -> None:
         logger.info("Launch vLLM OpenAI api_server at: %s:%s", self.server_host, self.server_port)
@@ -273,6 +291,7 @@ class VLLMEngine(RayActor):
             args=self.args,
             rank=self.rank,
             visible_devices=visible_devices,
+            model_path=self.model_path,
         )
         _wait_server_healthy(self._http_base(), process=self.process)
 
@@ -386,7 +405,7 @@ class VLLMEngine(RayActor):
                 response = requests.post(f"{self._http_base()}/reset_prefix_cache", params=params, timeout=60)
                 if response.status_code == 200:
                     return
-            except NewConnectionError:
+            except requests.ConnectionError:
                 raise
             except Exception as e:
                 logger.info("Error resetting vLLM prefix cache: %s", e)
@@ -401,41 +420,10 @@ class VLLMEngine(RayActor):
         return self._http_base()
 
     def shutdown(self):
+        logger.info("Shutdown vLLM engine %s:%s...", self.server_host, self.server_port)
+        self._deregister_worker_from_router()
         if self.args.rollout_external:
             return
-
-        logger.info("Shutdown vLLM engine %s:%s...", self.server_host, self.server_port)
-        if self.node_rank == 0 and self.router_ip and self.router_port:
-            worker_url = self._http_base()
-            response = None
-            if self.args.use_slime_router:
-                try:
-                    response = requests.post(
-                        f"http://{self.router_ip}:{self.router_port}/remove_worker",
-                        params={"url": worker_url},
-                        timeout=30,
-                    )
-                except Exception as e:
-                    logger.warning("Failed to remove vLLM worker from slime router: %s", e)
-            else:
-                try:
-                    all_workers = requests.get(
-                        f"http://{self.router_ip}:{self.router_port}/workers", timeout=30
-                    ).json()["workers"]
-                    for worker in all_workers:
-                        if worker["url"] == worker_url:
-                            wid = worker["id"]
-                            response = requests.delete(
-                                f"http://{self.router_ip}:{self.router_port}/workers/{wid}", timeout=30
-                            )
-                            break
-                    else:
-                        logger.warning("Worker %s not found in vllm-router during shutdown.", worker_url)
-                except Exception as e:
-                    logger.warning("Failed to list/remove worker on vllm-router: %s", e)
-
-            if response is not None:
-                response.raise_for_status()
 
         if self.process is None or not self.process.is_alive():
             return
@@ -505,6 +493,7 @@ class VLLMEngine(RayActor):
         """``POST /wake_up`` when sleep mode is on (SGLang: ``POST /resume_memory_occupation``); else a small placeholder dict."""
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
             return {"ok": True, "sleep_mode": False}
+        tags = _normalize_vllm_wake_tags(tags)
         # vLLM ``POST /wake_up`` uses ``query_params.getlist("tags")``, not JSON.
         # Omit params when ``tags`` is empty so the server wakes all tags (see api_router.wake_up).
         wake_params: list[tuple[str, str]] | None = (
@@ -614,23 +603,16 @@ class VLLMEngine(RayActor):
         return {"ok": True, "mode": self._sync_mode, "weight_version": self._weight_version}
 
     def update_weights_from_disk(self, model_path: str, load_format: str | None = None):
-        """
-        ``POST /collective_rpc`` with ``reload_weights`` (not SGLang's path-based ``/update_weights_from_disk``).
-
-        ``model_path`` / ``load_format`` are ignored for now but kept for a uniform training-side signature.
-        """
+        """``POST /collective_rpc`` with ``reload_weights`` and ``weights_path`` (SGLang uses a dedicated disk API)."""
         if self.node_rank != 0:
             return
-        logger.warning(
-            "vLLM does not support update_weights_from_disk equivalent API. "
-            "Fallback to POST /collective_rpc method=reload_weights. "
-            "model_path/load_format are ignored (model_path=%s, load_format=%s).",
-            model_path,
-            load_format,
-        )
+        del load_format
         response = requests.post(
             f"{self._http_base()}/collective_rpc",
-            json={"method": "reload_weights"},
+            json={
+                "method": "reload_weights",
+                "kwargs": {"weights_path": model_path, "is_checkpoint_format": True},
+            },
             timeout=600,
         )
         response.raise_for_status()
@@ -643,8 +625,13 @@ class VLLMEngine(RayActor):
         """``POST /pause`` with mode query (SGLang: ``POST /pause_generation``); returns the ``requests.Response``."""
         if self.node_rank != 0:
             return None
-        mode = getattr(self.args, "vllm_pause_mode", "abort")
-        response = requests.post(f"{self._http_base()}/pause", params={"mode": mode}, json={}, timeout=120)
+        mode = getattr(self.args, "vllm_pause_mode", "keep")
+        response = requests.post(
+            f"{self._http_base()}/pause",
+            params={"mode": mode, "clear_cache": "false"},
+            json={},
+            timeout=120,
+        )
         response.raise_for_status()
         return response
 

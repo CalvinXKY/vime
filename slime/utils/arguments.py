@@ -228,7 +228,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--vllm-weight-sync-mode",
                 type=str,
                 choices=["auto", "native", "reload"],
-                default="auto",
+                default="native",
                 help=(
                     "vLLM weight sync policy: 'native' launches vLLM with --weight-transfer-config and "
                     "init_weight_transfer_engine (Megatron NCCL / NcclBridge sync). "
