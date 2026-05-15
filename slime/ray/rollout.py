@@ -964,16 +964,8 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
         router_port = args.sglang_router_port
         if router_port is None:
             router_port = find_available_port(random.randint(3000, 4000))
-<<<<<<< Updated upstream
-    if getattr(args, "rollout_backend", "sglang") == "vllm":
-        from vllm_router.launch_router import RouterArgs
-    else:
-        from sglang_router.launch_router import RouterArgs
 
-=======
-
-    use_vllm_router = getattr(args, "rollout_backend", "sglang") == "vllm"
->>>>>>> Stashed changes
+    use_vllm_router = getattr(args, "rollout_backend", "vllm") == "vllm"
     from slime.utils.http_utils import run_router
 
     if use_vllm_router:

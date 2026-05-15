@@ -487,8 +487,14 @@ class VLLMEngine(RayActor):
         self.flush_cache()
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
             return {"ok": True, "sleep_mode": False, "note": "vLLM sleep mode disabled; no /sleep call."}
-        payload = {"level": int(getattr(self.args, "vllm_sleep_level", 1))}
-        response = requests.post(f"{self._http_base()}/sleep", json=payload, timeout=30)
+        # vLLM ``POST /sleep`` reads ``level`` from query params, not JSON body
+        # (``vllm.entrypoints.serve.sleep.api_router.sleep``).
+        level = int(getattr(self.args, "vllm_sleep_level", 1))
+        response = requests.post(
+            f"{self._http_base()}/sleep",
+            params={"level": level},
+            timeout=30,
+        )
         response.raise_for_status()
         try:
             return response.json()
@@ -499,8 +505,16 @@ class VLLMEngine(RayActor):
         """``POST /wake_up`` when sleep mode is on (SGLang: ``POST /resume_memory_occupation``); else a small placeholder dict."""
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
             return {"ok": True, "sleep_mode": False}
-        payload = {"tags": tags} if tags else {}
-        response = requests.post(f"{self._http_base()}/wake_up", json=payload, timeout=30)
+        # vLLM ``POST /wake_up`` uses ``query_params.getlist("tags")``, not JSON.
+        # Omit params when ``tags`` is empty so the server wakes all tags (see api_router.wake_up).
+        wake_params: list[tuple[str, str]] | None = (
+            [("tags", t) for t in tags] if tags else None
+        )
+        response = requests.post(
+            f"{self._http_base()}/wake_up",
+            params=wake_params,
+            timeout=30,
+        )
         response.raise_for_status()
         try:
             return response.json()

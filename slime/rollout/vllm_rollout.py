@@ -81,6 +81,21 @@ def _prepare_prompt_ids(sample: Sample, tokenizer, processor: Any) -> list[int]:
     return _coerce_flat_int_token_ids(tokenizer.encode(sample.prompt, add_special_tokens=False))
 
 
+def _base_dataset_prompt_ids(sample: Sample, tokenizer, processor: Any) -> list[int]:
+    """Token ids for the dataset prompt only (never reuse ``sample.tokens``).
+
+    Used for partial-continuation budgeting to match ``dev_vllm`` ``sglang_rollout``:
+    ``max_new_tokens -= len(sample.tokens) - len(base_prompt_ids)`` when ``sample.response`` is non-empty.
+    """
+    raw_multimodal_inputs = sample.multimodal_inputs or {}
+    has_multimodal_inputs = any(value is not None for value in raw_multimodal_inputs.values())
+    if processor and has_multimodal_inputs:
+        processor_output = processor(text=sample.prompt, **build_processor_kwargs(raw_multimodal_inputs))
+        prompt_ids = processor_output["input_ids"][0]
+        return _coerce_flat_int_token_ids(prompt_ids)
+    return _coerce_flat_int_token_ids(tokenizer.encode(sample.prompt, add_special_tokens=False))
+
+
 def get_model_url(args: Namespace, model_name: str, endpoint: str = "/v1/completions") -> str:
     """Return the router URL for a named model.
 
@@ -143,22 +158,29 @@ def _openai_meta_from_completion_choice(args: Namespace, choice: dict, usage: di
     return meta
 
 
-def _apply_vllm_routed_experts(args: Namespace, sample: Sample, output: dict, choice: dict) -> None:
-    """Populate ``sample.rollout_routed_experts`` from vLLM routing-replay JSON (see vLLM docs)."""
+def _apply_vllm_routed_experts(
+    args: Namespace,
+    sample: Sample,
+    _output: dict,
+    choice: dict,
+) -> None:
+    """Populate ``sample.rollout_routed_experts`` from vLLM ``choices[].routed_experts`` when enabled.
+
+    vLLM exposes MoE routing replay on the **per-completion** ``CompletionOutput`` as a single
+    ``routed_experts`` ndarray (shape ``[num_positions, num_layers, topk]``); the V1 scheduler
+    builds it once per finished request from KV slot indices for ``request.num_tokens - 1``
+    positions — there is **no** separate ``prompt_routed_experts`` key on the HTTP completion
+    payload (confirmed absent in upstream ``vllm``; see ``CompletionOutput`` in
+    ``vllm/outputs.py`` and ``_get_routed_experts`` in ``vllm/v1/core/sched/scheduler.py``).
+    When the OpenAI layer forwards it, it appears as an extra field on the choice object
+    (Pydantic ``extra="allow"`` on ``CompletionResponseChoice``).
+    """
     if not getattr(args, "use_rollout_routing_replay", False):
         return
     gen_re = choice.get("routed_experts")
-    prompt_re = output.get("prompt_routed_experts")
-    if gen_re is None and prompt_re is None:
+    if gen_re is None:
         return
-    parts: list[np.ndarray] = []
-    if prompt_re is not None:
-        parts.append(np.asarray(prompt_re, dtype=np.int32))
-    if gen_re is not None:
-        parts.append(np.asarray(gen_re, dtype=np.int32))
-    if not parts:
-        return
-    arr = np.concatenate(parts, axis=0) if len(parts) > 1 else parts[0]
+    arr = np.asarray(gen_re, dtype=np.int32)
     n_tok = len(sample.tokens)
     expected_rows = max(0, n_tok - 1)
     if arr.ndim != 3:
@@ -465,11 +487,17 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     ), f"Sample status is {sample.status}"
 
     prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
+    base_prompt_ids = _base_dataset_prompt_ids(sample, state.tokenizer, state.processor)
 
-    assert (
-        sampling_params["max_new_tokens"] >= 0
-    ), f"max_new_tokens: {sampling_params['max_new_tokens']} should not be less than 0"
-    if sampling_params["max_new_tokens"] == 0:
+    params = dict(sampling_params)
+    if len(sample.response) > 0:
+        params["max_new_tokens"] -= len(sample.tokens) - len(base_prompt_ids)
+
+    assert params["max_new_tokens"] >= 0, (
+        f"max_new_tokens: {params['max_new_tokens']} should not be less than 0 "
+        f"(after partial continuation adjustment; tokens={len(sample.tokens)}, base_prompt={len(base_prompt_ids)})"
+    )
+    if params["max_new_tokens"] == 0:
         sample.status = Sample.Status.TRUNCATED
         return sample
 
@@ -500,12 +528,12 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await post(render_url, render_payload, headers=headers)
         generate_body = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
-        generate_body["sampling_params"] = _build_inference_sampling_params(sampling_params)
+        generate_body["sampling_params"] = _build_inference_sampling_params(params)
         gen_url = f"{base}/inference/v1/generate"
-        with trace_span(sample, "vllm_mm_generate", attrs={"max_tokens": sampling_params["max_new_tokens"]}):
+        with trace_span(sample, "vllm_mm_generate", attrs={"max_tokens": params["max_new_tokens"]}):
             output = await post(gen_url, generate_body, headers=headers)
         choice = output["choices"][0]
-        skip_sp = sampling_params.get("skip_special_tokens")
+        skip_sp = params.get("skip_special_tokens")
         skip_decode = True if skip_sp is None else bool(skip_sp)
         out_ids = choice.get("token_ids") or []
         text = (
@@ -523,14 +551,16 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         )
     else:
         url = f"{base}/v1/completions"
-        # vLLM OpenAI ``prompt``: JSON string or flat array of integers. Prefer the rendered text when we
-        # have a string (e.g. ``apply_chat_template``) so the engine tokenizes once and we avoid bad JSON shapes.
-        if isinstance(sample.prompt, str):
-            prompt_field: str | list[int] = sample.prompt
+        # vLLM OpenAI ``prompt``: JSON string or flat array of integers. On partial continuation, send full
+        # ``sample.tokens`` as integer ids (aligned with dev_vllm ``sglang_rollout`` + vLLM backend).
+        if len(sample.response) > 0:
+            prompt_field = _coerce_flat_int_token_ids(sample.tokens)
+        elif isinstance(sample.prompt, str):
+            prompt_field = sample.prompt
         else:
             prompt_field = prompt_ids
-        payload = _build_completion_payload(args, sampling_params, prompt_field)
-        with trace_span(sample, "vllm_completions", attrs={"max_new_tokens": sampling_params["max_new_tokens"]}):
+        payload = _build_completion_payload(args, params, prompt_field)
+        with trace_span(sample, "vllm_completions", attrs={"max_new_tokens": params["max_new_tokens"]}):
             output = await post(url, payload, headers=headers)
         choice = output["choices"][0]
         text = choice.get("text") or ""
