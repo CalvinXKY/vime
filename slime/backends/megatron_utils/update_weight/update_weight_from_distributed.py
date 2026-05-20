@@ -18,7 +18,7 @@ from ray import ObjectRef
 from ray.actor import ActorHandle
 from tqdm import tqdm
 
-from slime.utils.distributed_utils import get_gloo_group, init_process_group
+from slime.utils.distributed_utils import get_gloo_group
 
 from ..megatron_to_hf import convert_to_hf
 from .common import all_gather_param, named_params_and_buffers
@@ -201,10 +201,6 @@ class _NcclBridge:
             self._process.terminate()
 
 
-def _is_vllm_backend(args: Namespace) -> bool:
-    return getattr(args, "rollout_backend", "sglang") == "vllm"
-
-
 class UpdateWeightFromDistributed:
     """
     Update distributed engines via NCCL. Each PP rank: group "slime-pp_{pp_rank}",
@@ -296,9 +292,7 @@ class UpdateWeightFromDistributed:
 
         use_vllm_packed = self._use_vllm_packed()
         if use_vllm_packed and self._is_pp_src_rank:
-            logger.info(
-                "Using vLLM packed weight sync (bucketed; metadata + trainer_send_weights per bucket)"
-            )
+            logger.info("Using vLLM packed weight sync (bucketed; metadata + trainer_send_weights per bucket)")
 
         if use_vllm_packed:
             buffer_size = 0
@@ -343,7 +337,9 @@ class UpdateWeightFromDistributed:
         if not use_vllm_packed:
             buffer_size = 0
             named_tensors = []
-            pbar = tqdm(desc=f"[{self._group_name}] Update weights (experts)", total=0) if self._is_pp_src_rank else None
+            pbar = (
+                tqdm(desc=f"[{self._group_name}] Update weights (experts)", total=0) if self._is_pp_src_rank else None
+            )
             for name, param in named_params_and_buffers(self.args, self.model):
                 if ".experts." not in name:
                     continue
@@ -368,8 +364,6 @@ class UpdateWeightFromDistributed:
 
     def _use_vllm_packed(self) -> bool:
         """Use vLLM packed weight transfer (one-shot metadata + trainer_send_weights)."""
-        if not _is_vllm_backend(self.args):
-            return False
         if not getattr(self.args, "vllm_weight_sync_packed", True):
             return False
         if any(".experts." in name for name, _ in named_params_and_buffers(self.args, self.model)):
@@ -390,7 +384,6 @@ class UpdateWeightFromDistributed:
                 self.weight_version,
                 self.rollout_engines,
                 converted_named_tensors,
-                use_vllm=True,
                 packed=True,
             )
             ray.get(refs)
@@ -507,7 +500,6 @@ class UpdateWeightFromDistributed:
             self.weight_version,
             self.rollout_engines,
             converted_named_tensors,
-            use_vllm=_is_vllm_backend(self.args),
             packed=False,
         )
 
@@ -564,30 +556,21 @@ def connect_rollout_engines_from_distributed(
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
 
-    if _is_vllm_backend(args):
-        device = torch.cuda.current_device()
-        logger.info(
-            "vLLM weight transfer via NcclBridge: addr=%s port=%d world_size=%d device=%d CVD=%s",
-            master_address,
-            master_port,
-            world_size,
-            device,
-            os.environ.get("CUDA_VISIBLE_DEVICES", ""),
-        )
-        model_update_groups = _NcclBridge(
-            master_address=master_address,
-            master_port=master_port,
-            world_size=world_size,
-            device=device,
-        )
-    else:
-        model_update_groups = init_process_group(
-            backend="nccl",
-            init_method=f"tcp://{master_address}:{master_port}",
-            world_size=world_size,
-            rank=0,
-            group_name=group_name,
-        )
+    device = torch.cuda.current_device()
+    logger.info(
+        "vLLM weight transfer via NcclBridge: addr=%s port=%d world_size=%d device=%d CVD=%s",
+        master_address,
+        master_port,
+        world_size,
+        device,
+        os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+    )
+    model_update_groups = _NcclBridge(
+        master_address=master_address,
+        master_port=master_port,
+        world_size=world_size,
+        device=device,
+    )
 
     ray.get(refs)
     return model_update_groups
@@ -603,30 +586,24 @@ def disconnect_rollout_engines_from_distributed(
     Destroy NCCL on training and engines.
     """
     refs = [engine.destroy_weights_update_group.remote(group_name) for engine in rollout_engines]
-    if _is_vllm_backend(args):
-        if isinstance(model_update_groups, _NcclBridge):
-            model_update_groups.shutdown()
-    elif model_update_groups is not None:
-        dist.destroy_process_group(model_update_groups)
+    if isinstance(model_update_groups, _NcclBridge):
+        model_update_groups.shutdown()
     ray.get(refs)
 
 
 def update_weights_from_distributed(
     group_name: str,
-    group: Any,
+    group: _NcclBridge,
     weight_version: int,
     rollout_engines: Sequence[ActorHandle],
     converted_named_tensors: Sequence[tuple[str, torch.Tensor]],
     *,
-    use_vllm: bool = False,
     packed: bool = False,
 ) -> list[ObjectRef]:
     """
-    Send metadata (Ray), broadcast tensors (NCCL rank 0 → engines).
-
-    For vLLM the *group* is an ``_NcclBridge`` instance (subprocess) so that
-    raw NCCL never runs inside the Megatron trainer process.
-    For sglang the *group* is a ``torch.distributed.ProcessGroup``.
+    Send metadata (Ray), broadcast tensors (NCCL rank 0 → vLLM engines via
+    the ``_NcclBridge`` subprocess so that raw NCCL never runs inside the
+    Megatron trainer process).
     """
     kwargs: dict[str, Any] = {
         "names": [name for name, _ in converted_named_tensors],
@@ -634,22 +611,15 @@ def update_weights_from_distributed(
         "shapes": [param.shape for _, param in converted_named_tensors],
         "group_name": group_name,
         "weight_version": str(weight_version),
+        "packed": packed,
     }
-    if use_vllm:
-        kwargs["packed"] = packed
 
     refs = [engine.update_weights_from_distributed.remote(**kwargs) for engine in rollout_engines]
 
-    if use_vllm and packed:
+    if packed:
         group.send_weights_packed(list(converted_named_tensors))
-    elif use_vllm:
-        group.broadcast_tensors([param.data for _, param in converted_named_tensors])
     else:
-        handles = []
-        for _, param in converted_named_tensors:
-            handles.append(dist.broadcast(param.data, 0, group=group, async_op=True))
-        for handle in handles:
-            handle.wait()
+        group.broadcast_tensors([param.data for _, param in converted_named_tensors])
 
     return refs
 
