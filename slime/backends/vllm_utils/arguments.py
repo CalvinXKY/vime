@@ -97,6 +97,13 @@ SKIPPED_DESTS = [
     # data_parallel_size remain user-controllable and auto-forward to the vllm
     # subprocess when set.
     "tensor_parallel_size",
+    # multi-node logical engine (orchestrator-owned)
+    "nnodes",
+    "node_rank",
+    "master_addr",
+    "master_port",
+    "data_parallel_backend",
+    "distributed_executor_backend",
     # network: engine launcher decides per-engine port/host
     "port",
     "host",
@@ -272,10 +279,10 @@ def add_vllm_arguments(parser):
     parser.add_argument = old_parser_add_argument
     parser.add_argument_group = old_parser_add_argument_group
 
-    # NOTE: we deliberately do NOT call ``parser.set_defaults(vllm_gpu_memory_utilization=...)``
-    # here, because argparse.set_defaults also mutates ``action.default`` — which would
-    # then make ``_forward_vllm_cli_args`` think the user accepted the vllm-side default
-    # and skip forwarding. vime-preferred defaults (e.g. gpu_memory_utilization=0.55,
+    # NOTE: we deliberately do NOT call ``parser.set_defaults`` for vllm flags here, because
+    # argparse.set_defaults also mutates ``action.default`` — which would make
+    # ``_forward_vllm_cli_args`` think the user accepted the vllm-side default and skip
+    # forwarding. vime-preferred defaults that genuinely differ from vllm (e.g.
     # weight_transfer_config based on colocate) are applied explicitly in
     # ``vllm_engine.launch_server_process``.
 
@@ -309,15 +316,11 @@ def validate_args(args):
     args.vllm_dp_size = args.vllm_data_parallel_size
     args.vllm_pp_size = args.vllm_pipeline_parallel_size
 
-    # Compute effective TP size considering PP size
-    if args.vllm_pp_size > 1:
-        assert args.rollout_num_gpus_per_engine % args.vllm_pp_size == 0, (
-            f"rollout_num_gpus_per_engine ({args.rollout_num_gpus_per_engine}) must be divisible by "
-            f"vllm_pipeline_parallel_size ({args.vllm_pp_size})"
-        )
-        args.vllm_tp_size = args.rollout_num_gpus_per_engine // args.vllm_pp_size
-    else:
-        args.vllm_tp_size = args.rollout_num_gpus_per_engine
+    # NOTE: TP is intentionally NOT precomputed here. A global ``vllm_tp_size`` derived from the
+    # *global* rollout_num_gpus_per_engine would shadow the per-engine value and break
+    # heterogeneous per-group engines (different num_gpus_per_engine). TP is resolved per engine
+    # in ``vllm_engine._resolve_vllm_parallel_sizes`` (tp = gpus_per_engine // pp), mirroring
+    # upstream slime's sglang_engine. (pp divisibility is validated there, per engine.)
 
     if getattr(args, "vllm_router_ip", None):
         args.vllm_router_ip = _wrap_ipv6(args.vllm_router_ip)
