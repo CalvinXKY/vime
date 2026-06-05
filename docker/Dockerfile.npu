@@ -1,0 +1,73 @@
+ARG BASE_IMAGE=registry-cbu.huawei.com/atelier/verl:verl_0.8.0-vllm_0.17.0-mindspeed_0.16.0-pytorch_2.9.0-cann_8.5.2-py_3.11-hce_2.0.2512-aarch64-snt9b-20260513174224-90d255f
+FROM ${BASE_IMAGE}
+
+ARG PATCH_VERSION=latest
+ARG MEGATRON_COMMIT=3bec9aa
+
+WORKDIR /home/ma-user
+
+RUN pip install vllm==0.17.0 --no-deps || true
+
+RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
+    cd Megatron-LM && git checkout ${MEGATRON_COMMIT}
+
+RUN git clone https://github.com/vllm-project/vllm-ascend.git && \
+    cd vllm-ascend && git checkout v0.17.0rc1
+
+RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@a193d9dd1b877d33c64a41cfb3db9f867df2d926 --no-cache-dir --force-reinstall || true
+
+COPY docker/patch/${PATCH_VERSION}/megatron.patch /home/ma-user/Megatron-LM/
+COPY docker/patch/${PATCH_VERSION}/megatron-npu.patch /home/ma-user/Megatron-LM/
+COPY docker/patch/${PATCH_VERSION}/megatron-bridge.patch /home/ma-user/Megatron-LM/
+RUN cd Megatron-LM && \
+    git update-index --refresh && \
+    git apply megatron.patch --3way && \
+    git apply megatron-npu.patch --3way && \
+    git apply megatron-bridge.patch --3way && \
+    if grep -R -n '^<<<<<<< ' .; then \
+      echo "Patch failed to apply cleanly. Please resolve conflicts." && \
+      exit 1; \
+    fi && \
+    rm megatron.patch megatron-npu.patch megatron-bridge.patch && \
+    pip install -e . --no-build-isolation
+
+COPY docker/patch/${PATCH_VERSION}/vllm.patch /home/ma-user/vllm/
+RUN cd vllm && \
+    git update-index --refresh && \
+    git apply vllm.patch --3way && \
+    if grep -R -n '^<<<<<<< ' .; then \
+      echo "Patch failed to apply cleanly. Please resolve conflicts." && \
+      exit 1; \
+    fi && \
+    rm vllm.patch
+
+COPY docker/patch/${PATCH_VERSION}/vllm-ascend.patch /home/ma-user/vllm-ascend/
+RUN cd vllm-ascend && \
+    git update-index --refresh && \
+    git apply vllm-ascend.patch --3way && \
+    if grep -R -n '^<<<<<<< ' .; then \
+      echo "Patch failed to apply cleanly. Please resolve conflicts." && \
+      exit 1; \
+    fi && \
+    rm vllm-ascend.patch
+
+COPY docker/patch/${PATCH_VERSION}/mindspeed.patch /home/ma-user/MindSpeed/
+RUN cd MindSpeed && \
+    git update-index --refresh && \
+    git apply mindspeed.patch --3way && \
+    if grep -R -n '^<<<<<<< ' .; then \
+      echo "Patch failed to apply cleanly. Please resolve conflicts." && \
+      exit 1; \
+    fi && \
+    rm mindspeed.patch
+
+ARG VIME_COMMIT=ascend
+RUN git clone -b ${VIME_COMMIT} https://github.com/vllm-project/vime.git /home/ma-user/vime && \
+    cd /home/ma-user/vime && \
+    pip install -e . --no-deps
+
+ENV PYTHONPATH=/home/ma-user/Megatron-LM:/home/ma-user/vllm:/home/ma-user/vime:${PYTHONPATH}
+ENV CUDA_DEVICE_MAX_CONNECTIONS=1
+
+ENTRYPOINT []
+CMD ["/bin/bash"]

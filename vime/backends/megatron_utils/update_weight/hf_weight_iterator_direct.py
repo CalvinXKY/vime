@@ -53,13 +53,13 @@ def _get_megatron_full_params(
         if dist.get_rank() == info.src_rank:
             params.append(
                 torch.nn.Parameter(
-                    megatron_local_weights[info.name].to(device=torch.cuda.current_device(), non_blocking=True),
+                    megatron_local_weights[info.name].to(device=torch.npu.current_device(), non_blocking=True),
                     requires_grad=False,
                 )
             )
         else:
-            params.append(torch.empty(info.shape, dtype=info.dtype, device=torch.cuda.current_device()))
-    torch.cuda.synchronize()
+            params.append(torch.empty(info.shape, dtype=info.dtype, device=torch.npu.current_device()))
+    torch.npu.synchronize()
 
     # broadcast params across pp ranks
     if pp_size > 1:

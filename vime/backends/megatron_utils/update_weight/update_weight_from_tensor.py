@@ -36,8 +36,8 @@ from .update_weight_from_distributed import (
 
 
 def _current_gpu_uuid() -> str:
-    device_index = torch.cuda.current_device()
-    props = torch.cuda.get_device_properties(device_index)
+    device_index = torch.npu.current_device()
+    props = torch.npu.get_device_properties(device_index)
     return str(props.uuid)
 
 

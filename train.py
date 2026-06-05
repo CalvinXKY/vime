@@ -1,3 +1,4 @@
+import mindspeed
 import ray
 
 from vime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models

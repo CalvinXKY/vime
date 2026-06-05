@@ -1,0 +1,78 @@
+diff --git a/vllm_ascend/worker/worker.py b/vllm_ascend/worker/worker.py
+index e6afa675..217cb872
+--- a/vllm_ascend/worker/worker.py
++++ b/vllm_ascend/worker/worker.py
+@@ -42,6 +42,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+ from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
++from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+ from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
+ from vllm.v1.worker.worker_base import WorkerBase
+ from vllm.v1.worker.workspace import init_workspace_manager
+@@ -137,6 +138,15 @@ class NPUWorker(WorkerBase):
+         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+         self._pp_send_work: list[Handle] = []
+ 
++        self.weight_transfer_engine = (
++            WeightTransferEngineFactory.create_engine(
++                self.vllm_config.weight_transfer_config,
++                self.vllm_config.parallel_config,
++            )
++            if self.vllm_config.weight_transfer_config is not None
++            else None
++        )
++
+         ascend_compilation_config = get_ascend_config().ascend_compilation_config
+         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
+             # Prevent duplicate triggers, execute the exit logic only once
+@@ -647,6 +657,49 @@ class NPUWorker(WorkerBase):
+     def take_draft_token_ids(self) -> DraftTokenIds | None:
+         return self.model_runner.take_draft_token_ids()
+ 
++    def init_weight_transfer_engine(self, init_info: dict) -> None:
++        if self.weight_transfer_engine is None:
++            raise RuntimeError(
++                "Weight transfer not configured. "
++                "Please set weight_transfer_config to enable weight transfer."
++            )
++        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
++        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
++
++    def update_weights(self, update_info: dict) -> None:
++        if self.weight_transfer_engine is None:
++            raise RuntimeError(
++                "Weight transfer not configured. "
++                "Please set weight_transfer_config to enable weight transfer."
++            )
++        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
++
++        model = self.model_runner.model
++
++        if typed_update_info.is_checkpoint_format:
++            from vllm.model_executor.model_loader.reload import (
++                finalize_layerwise_reload,
++                initialize_layerwise_reload,
++            )
++
++            with torch.device(self.device):
++                initialize_layerwise_reload(model)
++                self.weight_transfer_engine.receive_weights(
++                    typed_update_info,
++                    load_weights=model.load_weights,
++                )
++                finalize_layerwise_reload(model, self.model_config)
++        else:
++            def load_weights_direct(
++                weights: list[tuple[str, torch.Tensor]],
++            ) -> None:
++                model.load_weights(weights)
++
++            self.weight_transfer_engine.receive_weights(
++                typed_update_info,
++                load_weights=load_weights_direct,
++            )
++
+     def check_health(self) -> None:
+         import subprocess
+ 

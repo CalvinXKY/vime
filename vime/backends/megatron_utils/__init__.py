@@ -4,16 +4,19 @@ import torch
 
 try:
     import deep_ep
-    from torch_memory_saver import torch_memory_saver
+    try:
+        from torch_memory_saver import torch_memory_saver
+    except ImportError:
+        torch_memory_saver = None
 
     old_init = deep_ep.Buffer.__init__
 
     def new_init(self, *args, **kwargs):
-        if torch_memory_saver._impl is not None:
+        if torch_memory_saver is not None and torch_memory_saver._impl is not None:
             torch_memory_saver._impl._binary_wrapper.cdll.tms_set_interesting_region(False)
         old_init(self, *args, **kwargs)
-        torch.cuda.synchronize()
-        if torch_memory_saver._impl is not None:
+        torch.npu.synchronize()
+        if torch_memory_saver is not None and torch_memory_saver._impl is not None:
             torch_memory_saver._impl._binary_wrapper.cdll.tms_set_interesting_region(True)
 
     deep_ep.Buffer.__init__ = new_init
