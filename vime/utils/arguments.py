@@ -1739,6 +1739,13 @@ def vime_validate_args(args):
     if args.debug_rollout_only:
         if args.colocate and (not args.rollout_num_gpus):
             args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
+            if args.num_gpus_per_node != args.actor_num_gpus_per_node:
+                logger.info(
+                    f"debug_rollout_only colocate: overriding num_gpus_per_node "
+                    f"{args.num_gpus_per_node} -> actor_num_gpus_per_node "
+                    f"{args.actor_num_gpus_per_node} (per-physical-node GPU count)."
+                )
+                args.num_gpus_per_node = args.actor_num_gpus_per_node
         else:
             args.actor_num_gpus_per_node = min(8, args.rollout_num_gpus)
             args.actor_num_nodes = args.rollout_num_gpus // args.actor_num_gpus_per_node
