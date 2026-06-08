@@ -99,7 +99,7 @@ def execute():
     )
 
     if USE_DEEPEP:
-        vllm_args += "--vllm-all2all-backend deepep_high_throughput "
+        vllm_args += "--vllm-all2all-backend deepep_high_throughput --vllm-enable-expert-parallel "
 
     ci_args = "--ci-test "
 
