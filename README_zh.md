@@ -18,9 +18,16 @@ Vime 继承了 slime 广泛的模型支持，包括：
 - [Slack](https://vllm-dev.slack.com/archives/C0B8W5QFL22/p1780899164831779)
 - [微信群](./imgs/wechat_group.png)
 
+## 定位
+
+vLLM 社区横向支持许多 LLM post-training 框架，包括 [NeMo RL](https://github.com/NVIDIA-NeMo/RL)、[OpenRLHF](https://github.com/openrlhf/openrlhf)、[verl](https://github.com/verl-project/verl) 等。我们创建了 Vime 项目，是因为一些 post-training 用户喜欢 slime，但 slime 维护者没有足够精力维护 vLLM 集成。Vime 并不是这些框架的竞争者；相反，我们希望它能与它们共存，为用户提供更多选择。vLLM 社区也会持续支持这些 post-training 框架中的 vLLM 集成。
+
+我们不期望大量新的 post-training 相关功能直接加入 Vime。欢迎 bugfix 和性能优化。
+
 ## 目录
 
 - [Vime](#vime)
+  - [定位](#定位)
   - [目录](#目录)
   - [架构总览](#架构总览)
   - [快速开始](#快速开始)
@@ -29,7 +36,6 @@ Vime 继承了 slime 广泛的模型支持，包括：
   - [slime doc](#slime-doc)
   - [FAQ](#faq)
   - [致谢](#致谢)
-  - [定位](#定位)
   - [引用](#引用)
 
 ## 架构总览
@@ -96,12 +102,6 @@ Vime 由 slime 衍生而来。以下上游资源与本仓库文档仍沿用 slim
 ## 致谢
 
 特别感谢 **slime** 社区的出色工作。Vime 由 vLLM 社区维护。
-
-## 定位
-
-vLLM 社区横向支持许多 LLM post-training 框架，包括 [NeMo RL](https://github.com/NVIDIA-NeMo/RL)、[OpenRLHF](https://github.com/openrlhf/openrlhf)、[verl](https://github.com/verl-project/verl) 等。我们构建 Vime 项目，是因为一些 post-training 用户喜欢 slime，但 slime 维护者没有足够精力维护 vLLM 集成。Vime 并不是这些框架的竞争者；相反，我们希望它能与它们共存，为用户提供更多选择。vLLM 社区也会持续支持这些 post-training 框架中的 vLLM 集成。
-
-我们不期望大量新的 post-training 相关功能直接加入 Vime。欢迎 bugfix 和性能优化。
 
 ## 引用
 
