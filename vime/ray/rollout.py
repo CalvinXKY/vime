@@ -2,7 +2,6 @@ import dataclasses
 import itertools
 import logging
 import multiprocessing
-import os
 import random
 import time
 from pathlib import Path
@@ -124,12 +123,7 @@ class ServerGroup:
                 placement_group_bundle_index=reordered_bundle_indices[gpu_index],
             )
 
-            env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST} | {
-                key: os.environ.get(key, default_val)
-                for key, default_val in {
-                    "VIME_ENABLE_PROFILING": "true",
-                }.items()
-            }
+            env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST}
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
                 num_gpus=num_gpus,
