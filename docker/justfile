@@ -3,14 +3,14 @@
 # both the linux/amd64 and linux/arm64 digests and `docker pull` auto-selects
 # the platform. No arch suffix is ever published as a tag.
 #
-# CUDA 12.9 is the default, so it carries NO cu marker in the tag (like
-# slimerl/slime). Only the non-default cu13 variant is suffixed.
+# CUDA 12.9 is the default, so it carries NO cu marker in the tag. Only the
+# non-default cu13 variant is suffixed.
 #
 # The CUDA + source-built FA/TE images can't be cross-emulated, so each arch is
 # built on its own native host and pushed BY DIGEST (no tag lands in the hub),
 # then the two digests are fused into the final tag with `just manifest`.
 #
-# Tag scheme (mirrors slime's `nightly-dev-<date>` + `latest`):
+# Tag scheme:
 #   inferactinc/public:vime-<version>        immutable, multi-arch (cu12.9)
 #   inferactinc/public:vime-latest           rolling,   multi-arch (cu12.9)
 #   inferactinc/public:vime-cu13-<version>   immutable, multi-arch (cu13 variant)
@@ -63,7 +63,7 @@ manifest VARIANT AMD_DIGEST ARM_DIGEST:
     docker buildx imagetools create -t "{{IMAGE}}:vime${SUFFIX}-${VERSION}" -t "{{IMAGE}}:vime${SUFFIX}-latest" "{{IMAGE}}@{{AMD_DIGEST}}" "{{IMAGE}}@{{ARM_DIGEST}}"
 
 # ---- single-arch test/debug image for the run-ci-image validation job ----
-# slime-test analog; the e2e-test-image runner is x86, so this is amd64-only and
+# The e2e-test-image runner is x86, so this is amd64-only and
 # needs no manifest.
 build-test:
     #!/bin/bash

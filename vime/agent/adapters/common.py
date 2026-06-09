@@ -174,7 +174,7 @@ def _sampling_params(session: Any, body: dict, *, max_token_keys: tuple[str, ...
 
 
 def _vllm_sampling_body(sp: dict) -> dict:
-    """Map the canonical (sglang-shaped) sampling dict to a vLLM ``/inference/v1/generate``
+    """Map the canonical sampling dict to a vLLM ``/inference/v1/generate``
     ``sampling_params`` body. vLLM uses ``max_tokens`` (not ``max_new_tokens``) and returns
     per-token logprobs when ``logprobs`` is set."""
     body: dict[str, Any] = {
@@ -270,9 +270,9 @@ async def call_vllm_generate(
         fr = choice.get("finish_reason")
         finish = fr if isinstance(fr, str) and fr else "stop"
     except (asyncio.CancelledError, aiohttp.ClientError, asyncio.TimeoutError):
-        # vLLM ``/inference/v1/generate`` has no per-request HTTP abort endpoint (unlike
-        # sglang ``/abort_request``). Cancelling the in-flight task tears down the aiohttp
-        # request, which drops the streaming connection so vLLM stops generating.
+        # vLLM ``/inference/v1/generate`` has no per-request HTTP abort endpoint.
+        # Cancelling the in-flight task tears down the aiohttp request, which drops
+        # the streaming connection so vLLM stops generating.
         if task is not None:
             task.cancel()
         raise

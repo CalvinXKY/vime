@@ -17,15 +17,12 @@ The outer rollout loop (semaphore, dp_rank balancing, abort orchestration,
 partial-rollout buffer hand-off) is still owned by ``vllm_rollout``; this file
 only replaces the inner HTTP call.
 
-vime/vLLM counterpart of ``slime.rollout.sglang_streaming_rollout``. The
-behavioural difference from sglang matters here: sglang's streamed
-``meta_info.output_token_logprobs`` is **cumulative** (every chunk references
-the full list-so-far), whereas vLLM's ``/inference/v1/generate`` SSE chunks
-carry **delta** ``token_ids`` + ``logprobs`` per
-``GenerateResponseStreamChoice`` — so we *accumulate* the per-chunk deltas
-(``+=``) rather than overwriting from each chunk. Each delta choice has the
-same ``token_ids`` / ``logprobs.content`` shape as the non-streaming choice, so
-we parse it inline exactly like :func:`vime.rollout.vllm_rollout.generate`.
+vLLM's ``/inference/v1/generate`` SSE chunks carry **delta** ``token_ids`` +
+``logprobs`` per ``GenerateResponseStreamChoice`` — so we *accumulate* the
+per-chunk deltas (``+=``) rather than overwriting from each chunk. Each delta
+choice has the same ``token_ids`` / ``logprobs.content`` shape as the
+non-streaming choice, so we parse it inline exactly like
+:func:`vime.rollout.vllm_rollout.generate`.
 """
 
 import base64

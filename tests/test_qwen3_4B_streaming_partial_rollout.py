@@ -10,10 +10,6 @@ cut, then the partial groups get recycled into the data buffer).
 Uses Qwen3-4B (vs the 0.5B in other short tests) so responses on dapo-math
 are long enough to actually trigger mid-stream aborts, and good enough to
 produce non-zero rewards.
-
-vime counterpart of slime's ``test_qwen3_4B_streaming_partial_rollout`` — the
-only structural change is the rollout engine: sglang args become vLLM args and
-the generate function points at ``vllm_streaming_rollout``.
 """
 
 import os
