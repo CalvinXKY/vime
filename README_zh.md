@@ -2,6 +2,8 @@
 
 [English](./README.md) · [代码仓库](https://github.com/vllm-project/vime)
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/vllm-project/vime)
+
 **Vime** 是基于 [slime](https://github.com/THUDM/slime) 的 RL scaling 用 LLM post-training 框架。在保留 slime 训练栈与数据生成设计的同时，默认以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端。Vime 提供两大核心能力：
 
 1. **高性能训练**：通过连接 Megatron 与 vLLM，支持各种模式的高效训练；

@@ -2,6 +2,8 @@
 
 [中文版](./README_zh.md) · [Repository](https://github.com/vllm-project/vime)
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/vllm-project/vime)
+
 **Vime** is an LLM post-training framework for RL scaling, built on [slime](https://github.com/THUDM/slime). It keeps slime's training stack and data-generation design while using [**vLLM**](https://github.com/vllm-project/vllm) (with [vllm-router](https://github.com/vllm-project/router)) as the default rollout backend. Vime provides two core capabilities:
 
 1. **High-performance training**: Efficient training in various modes by connecting Megatron with vLLM;
