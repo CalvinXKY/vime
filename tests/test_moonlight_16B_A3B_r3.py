@@ -2,7 +2,6 @@ import os
 import vime.utils.external_utils.command_utils as U
 
 ENABLE_EVAL = bool(int(os.environ.get("VIME_TEST_ENABLE_EVAL", "1")))
-TIGHT_HOST_MEMORY = bool(int(os.environ.get("VIME_TEST_TIGHT_HOST_MEMORY", "1")))
 
 MODEL_NAME = "Moonlight-16B-A3B-Instruct"
 MODEL_TYPE = "moonlight"
@@ -57,12 +56,12 @@ def execute():
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
         "--use-dynamic-batch-size "
-        f"--max-tokens-per-gpu {2048 if TIGHT_HOST_MEMORY else 2048} "
+        "--max-tokens-per-gpu 8192 "
     )
 
     grpo_args = (
         "--advantage-estimator gspo "
-        f"{'' if TIGHT_HOST_MEMORY else '--use-kl-loss '}"
+        "--use-kl-loss "
         "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
         "--kl-coef 0.00 "

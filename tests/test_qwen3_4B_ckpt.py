@@ -1,11 +1,11 @@
 import os
 from argparse import ArgumentParser
+from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
 
 
-ENABLE_EVAL = bool(int(os.environ.get("VIME_TEST_ENABLE_EVAL", "1")))
-TIGHT_HOST_MEMORY = bool(int(os.environ.get("VIME_TEST_TIGHT_HOST_MEMORY", "1")))
+ENABLE_EVAL = bool(int(os.environ.get("SLIME_TEST_ENABLE_EVAL", "1")))
 
 MODEL_NAME = "Qwen3-4B"
 MODEL_TYPE = "qwen3-4B"
@@ -14,12 +14,20 @@ NUM_GPUS = 8
 
 parser = ArgumentParser()
 parser.add_argument("--async-save", action="store_true", help="Whether to test async save/load.")
+parser.add_argument("--save-optimizer", choices=["cpu", "gpu"], default="cpu", help="Optimizer placement for save.")
+parser.add_argument("--load-optimizer", choices=["cpu", "gpu"], default="cpu", help="Optimizer placement for load.")
+parser.add_argument("--checkpoint-dir", default=None, help="Directory used for the save/load checkpoint roundtrip.")
 
 
-def prepare():
+def default_checkpoint_dir(args):
+    save_mode = "async" if args.async_save else "sync"
+    return f"/root/models/{MODEL_NAME}_vime_{save_mode}_{args.save_optimizer}_save_{args.load_optimizer}_load"
+
+
+def prepare(checkpoint_dir: str):
     U.exec_command("mkdir -p /root/models /root/datasets")
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.exec_command(f"rm -rf /root/models/{MODEL_NAME}_vime")
+    U.exec_command(f"rm -rf {quote(checkpoint_dir)}")
     U.hf_download_dataset("zhuzilin/dapo-math-17k")
     U.hf_download_dataset("zhuzilin/aime-2024")
 
@@ -28,18 +36,33 @@ def prepare():
     )
 
 
-def execute(mode: str = ""):
+def optimizer_args(optimizer: str):
+    args = (
+        "--optimizer adam "
+        "--lr 1e-6 "
+        "--lr-decay-style constant "
+        "--weight-decay 0.1 "
+        "--adam-beta1 0.9 "
+        "--adam-beta2 0.98 "
+        "--use-precision-aware-optimizer "
+    )
+    if optimizer == "cpu":
+        args += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d "
+    return args
+
+
+def execute(mode: str = "", optimizer: str = "cpu", checkpoint_dir: str = ""):
     ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}_torch_dist "
+    checkpoint_dir_arg = quote(checkpoint_dir)
     if mode == "save":
-        ckpt_args += f"--save /root/models/{MODEL_NAME}_vime "
+        ckpt_args += f"--save {checkpoint_dir_arg} "
         ckpt_args += "--save-interval 2 "
     elif mode == "async_save":
-        ckpt_args += f"--save /root/models/{MODEL_NAME}_vime "
+        ckpt_args += f"--save {checkpoint_dir_arg} "
         ckpt_args += "--save-interval 2 "
-        # Real async save (Megatron disables async without persistent ckpt worker).
-        ckpt_args += "--async-save --use-persistent-ckpt-worker "
+        ckpt_args += "--async-save "
     elif mode == "load":
-        ckpt_args += f"--load /root/models/{MODEL_NAME}_vime "
+        ckpt_args += f"--load {checkpoint_dir_arg} "
         ckpt_args += "--ckpt-step 1 "
 
     rollout_args = (
@@ -51,7 +74,7 @@ def execute(mode: str = ""):
         "--rm-type deepscaler "
         "--num-rollout 2 "
         "--rollout-batch-size 4 "
-        "--n-samples-per-prompt 8 "
+        "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
         "--global-batch-size 16 "
@@ -67,7 +90,7 @@ def execute(mode: str = ""):
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
         "--use-dynamic-batch-size "
-        f"--max-tokens-per-gpu {2048 if TIGHT_HOST_MEMORY else 16384} "
+        "--max-tokens-per-gpu 16384 "
     )
 
     ppo_args = (
@@ -77,26 +100,6 @@ def execute(mode: str = ""):
         "--kl-coef 0.00 "
         "--entropy-coef 0.00 "
         "--eps-clip 0.2 "
-    )
-
-    optimizer_args = (
-        "--optimizer adam "
-        "--lr 1e-6 "
-        "--lr-decay-style constant "
-        "--weight-decay 0.1 "
-        "--adam-beta1 0.9 "
-        "--adam-beta2 0.98 "
-        "--optimizer-cpu-offload "
-        "--overlap-cpu-optimizer-d2h-h2d "
-        "--use-precision-aware-optimizer "
-        # PAO + cpu-offload (HybridDeviceOptimizer) shards are not equal-length
-        # across save/load ranks under the default dp_reshardable (bucket-centric)
-        # sharding, so dist-ckpt load fails with
-        # "Cannot merge two lists with different lengths (81 and 79)".
-        # fully_reshardable is model-centric and immune to bucket-layout changes;
-        # verified on the r3 image (Megatron 0.16.0rc0) that save+load both pass.
-        # This is the flag described in PR #50 that never actually landed.
-        "--dist-ckpt-optim-fully-reshardable "
     )
 
     vllm_args = (
@@ -122,7 +125,7 @@ def execute(mode: str = ""):
     train_args = (
         f"{ckpt_args} "
         f"{rollout_args} "
-        f"{optimizer_args} "
+        f"{optimizer_args(optimizer)} "
         f"{ppo_args} "
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
@@ -141,8 +144,13 @@ def execute(mode: str = ""):
 if __name__ == "__main__":
     args = parser.parse_args()
     # TODO also use typer
-    prepare()
+    checkpoint_dir = args.checkpoint_dir or default_checkpoint_dir(args)
+    prepare(checkpoint_dir)
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
-    execute("save" if not args.async_save else "async_save")
-    execute("load")
+    execute(
+        "save" if not args.async_save else "async_save",
+        optimizer=args.save_optimizer,
+        checkpoint_dir=checkpoint_dir,
+    )
+    execute("load", optimizer=args.load_optimizer, checkpoint_dir=checkpoint_dir)

@@ -103,7 +103,7 @@ def execute():
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 2048 "
+        "--max-tokens-per-gpu 8192 "
     )
     vllm_args = (
         "--rollout-num-gpus 8 "

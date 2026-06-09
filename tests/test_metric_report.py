@@ -33,10 +33,10 @@ from vime.backends.megatron_utils.cp_utils import (  # noqa: E402
 )
 
 
-@pytest.fixture
 NUM_GPUS = 0
 
 
+@pytest.fixture
 def mock_dp_with_cp_group(monkeypatch):
     """A sentinel "process group" object plus a no-op ``dist.all_reduce``.
 

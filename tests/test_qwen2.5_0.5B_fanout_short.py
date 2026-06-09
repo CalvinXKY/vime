@@ -72,11 +72,11 @@ def prepare():
 def execute():
     ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
 
-    # Shape: rollout_batch_size=8 prompts, n_samples_per_prompt=1 (all
+    # Shape: rollout_batch_size=4 prompts, n_samples_per_prompt=1 (all
     # fan-out is owned by compact_generate; this knob stays at 1 so a
     # regression that confuses sample count vs rollout count surfaces),
-    # global_batch_size=4 → 2 training steps per rollout, num_rollout=3
-    # → 6 total training steps.
+    # global_batch_size=4 → 1 training step per rollout, num_rollout=2
+    # → 2 total training steps.
     #
     # NB no ``--group-rm``: when custom_generate returns ``list[Sample]``
     # the per-sample rm path inside ``generate_and_rm`` (vllm_rollout.py)
@@ -144,9 +144,7 @@ def execute():
     )
 
     vllm_args = (
-        "--rollout-num-gpus-per-engine 1 "
-        "--vllm-gpu-memory-utilization 0.7 "
-        "--vllm-max-cudagraph-capture-size 8 "
+        "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.7 " "--vllm-max-cudagraph-capture-size 8 "
     )
 
     ci_args = "--ci-test "

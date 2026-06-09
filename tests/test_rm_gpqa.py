@@ -26,6 +26,8 @@ import pytest
 
 from vime.rollout.rm_hub.gpqa import DEFAULT_VALID_LETTERS, _extract_letter_from_response, compute_gpqa_reward
 
+NUM_GPUS = 0
+
 # ---------------------------------------------------------------------------
 # _extract_letter_from_response
 # ---------------------------------------------------------------------------
@@ -49,9 +51,6 @@ from vime.rollout.rm_hub.gpqa import DEFAULT_VALID_LETTERS, _extract_letter_from
         ("we ruled out A, then B, settled on C", "C"),
     ],
 )
-NUM_GPUS = 0
-
-
 def test_extract_letter_named_patterns_and_fallback(response, expected):
     assert _extract_letter_from_response(response, DEFAULT_VALID_LETTERS) == expected
 

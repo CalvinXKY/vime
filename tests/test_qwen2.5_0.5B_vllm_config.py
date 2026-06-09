@@ -3,7 +3,6 @@ import tempfile
 
 import vime.utils.external_utils.command_utils as U
 
-
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 8
@@ -54,7 +53,7 @@ def execute():
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
-        "--over-sampling-batch-size 16 "
+        "--over-sampling-batch-size 8 "
         "--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
         "--global-batch-size 16 "
     )

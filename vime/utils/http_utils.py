@@ -114,17 +114,16 @@ def _wrap_ipv6(host):
         return host
 
 
-def run_router(router_args):
-    """Start the vllm-router HTTP gateway in a child process."""
+def run_router(args):
     try:
         from vllm_router.launch_router import launch_router
 
-        router = launch_router(router_args)
+        router = launch_router(args)
         if router is None:
             return 1
         return 0
-    except Exception:
-        logger.exception("run_router failed. Ensure vllm-router is installed and RouterArgs are valid.")
+    except Exception as e:
+        logger.info(e)
         return 1
 
 
@@ -199,26 +198,13 @@ async def _post(client, url, payload, max_retries=60, headers=None):
     return output
 
 
-def get_rollout_num_engines(args) -> int:
-    """Return the number of rollout HTTP engines behind the router."""
-    if (num_engines := getattr(args, "rollout_num_engines", None)) is not None:
-        return int(num_engines)
-
-    rollout_num_gpus = getattr(args, "rollout_num_gpus", None) or 0
-    rollout_num_gpus_per_engine = getattr(args, "rollout_num_gpus_per_engine", None) or 1
-    if rollout_num_gpus <= 0:
-        return 0
-    return max(1, rollout_num_gpus // rollout_num_gpus_per_engine)
-
-
 def init_http_client(args):
     """Initialize HTTP client and optionally enable distributed POST via Ray."""
     global _http_client, _client_concurrency, _distributed_post_enabled
-    num_engines = get_rollout_num_engines(args)
-    if num_engines <= 0:
+    if not args.rollout_num_gpus:
         return
 
-    _client_concurrency = args.vllm_server_concurrency * num_engines
+    _client_concurrency = args.vllm_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
     if _http_client is None:
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=_client_concurrency),

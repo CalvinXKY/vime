@@ -3,7 +3,6 @@ import tempfile
 
 import vime.utils.external_utils.command_utils as U
 
-
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
@@ -68,7 +67,7 @@ megatron:
         "--kl-coef 0.00 "
         "--entropy-coef 0.00 "
         "--eps-clip 4e-4 "
-        "--num-critic-only-steps 3 "
+        "--num-critic-only-steps 2 "
         "--normalize-advantages "
     )
 

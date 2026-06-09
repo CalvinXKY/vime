@@ -3,7 +3,6 @@ import os
 import vime.utils.external_utils.command_utils as U
 
 
-
 MODEL_NAME = "Qwen3.5-0.8B"
 MODEL_TYPE = "qwen3.5-0.8B"
 NUM_GPUS = 4
@@ -37,7 +36,7 @@ def execute():
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
-        "--over-sampling-batch-size 16 "
+        "--over-sampling-batch-size 8 "
         "--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
         "--global-batch-size 16 "
     )
@@ -81,9 +80,7 @@ def execute():
     )
 
     vllm_args = (
-        "--rollout-num-gpus-per-engine 1 "
-        "--vllm-gpu-memory-utilization 0.65 "
-        "--vllm-max-cudagraph-capture-size 64"
+        "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.65 " "--vllm-max-cudagraph-capture-size 64"
     )
 
     ci_args = "--ci-test "

@@ -249,7 +249,9 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         if len(call_log_probs) == len(call_tokens):
             new_response_log_probs = [float(x) for x in call_log_probs]
         else:
-            new_response_log_probs = ([float(x) for x in call_log_probs] + [0.0] * len(call_tokens))[: len(call_tokens)]
+            new_response_log_probs = ([float(x) for x in call_log_probs] + [0.0] * len(call_tokens))[
+                : len(call_tokens)
+            ]
 
         # Build meta_info from the terminal choice + usage, mirroring generate().
         fr = last_choice.get("finish_reason") or "stop"

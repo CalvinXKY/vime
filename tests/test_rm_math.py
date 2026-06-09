@@ -31,15 +31,15 @@ from vime.rollout.rm_hub.math_utils import (
 )
 
 
+NUM_GPUS = 0
+
+
 # ---------------------------------------------------------------------------
 # last_boxed_only_string — hand-rolled brace counter
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-NUM_GPUS = 0
-
-
 def test_last_boxed_returns_last_when_multiple():
     """When two boxed expressions exist, ``rfind`` picks the last one."""
     s = r"first attempt \boxed{wrong}, final \boxed{42}"
