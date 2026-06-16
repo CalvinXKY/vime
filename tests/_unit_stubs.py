@@ -207,12 +207,13 @@ def install_vllm_cli_stubs() -> None:
 
 
 def install_triton_stub() -> None:
-    if real_module_available("triton"):
-        return
+    # CPU CI images may have a broken/partial triton install that imports
+    # but fails during module init, so always override it for unit tests.
     triton_mod = MagicMock()
     triton_mod.jit = lambda fn: fn
     triton_mod.cdiv = lambda a, b: (a + b - 1) // b
     triton_mod.next_power_of_2 = lambda x: x
+    triton_mod.__version__ = "0.0.0"
     language = MagicMock()
     triton_mod.language = language
     sys.modules["triton"] = triton_mod
