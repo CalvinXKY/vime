@@ -2201,3 +2201,21 @@ index 01897c1..6cf20ce
  
              n = torch.empty((), dtype=torch.int64, device=dev)
              _broadcast(n)
+
+diff --git a/megatron/core/transformer/dot_product_attention.py b/megatron/core/transformer/dot_product_attention.py
+--- a/megatron/core/transformer/dot_product_attention.py
++++ b/megatron/core/transformer/dot_product_attention.py
+@@ -156,9 +156,10 @@ class DotProductAttention(MegatronModule):
+         packed_seq_params: Optional[PackedSeqParams] = None,
+     ):
+         """Forward."""
+-        assert packed_seq_params is None, (
+-            "Packed sequence is not supported by DotProductAttention."
+-            "Please use TEDotProductAttention instead."
+-        )
++        # NPU: vime npu_attention_patch replaces forward; keep assert disabled as fallback.
++        # assert packed_seq_params is None, (
++        #     "Packed sequence is not supported by DotProductAttention."
++        #     "Please use TEDotProductAttention instead."
++        # )
+         assert attention_bias is None, "Attention bias is not supported for DotProductAttention."

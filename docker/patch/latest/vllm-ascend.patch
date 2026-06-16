@@ -63,10 +63,49 @@ index e6afa675..87977fc3 100644
 +                )
 +                finalize_layerwise_reload(model, self.model_config)
 +        else:
++            from vllm.model_executor.utils import get_packed_modules_mapping
++
++            packed_map = get_packed_modules_mapping(model)
++            sub_to_packed = {}
++            for packed_name, sub_names in packed_map.items():
++                for idx, sub_name in enumerate(sub_names):
++                    sub_to_packed[sub_name] = (packed_name, idx)
++            qkv_shard_ids = {"q_proj": "q", "k_proj": "k", "v_proj": "v"}
++
++            def _remap_and_get_shard_id(hf_name: str) -> tuple[str, object | None]:
++                parts = hf_name.split(".")
++                shard_id = None
++                for i in range(len(parts)):
++                    if parts[i] in sub_to_packed:
++                        packed_name, idx = sub_to_packed[parts[i]]
++                        shard_id = qkv_shard_ids.get(parts[i], idx)
++                        parts[i] = packed_name
++                        break
++                return ".".join(parts), shard_id
++
 +            def load_weights_direct(
 +                weights: list[tuple[str, torch.Tensor]],
 +            ) -> None:
-+                model.load_weights(weights)
++                for name, weight in weights:
++                    remapped, shard_id = _remap_and_get_shard_id(name)
++                    try:
++                        param = model.get_parameter(remapped)
++                    except AttributeError:
++                        continue
++                    weight_loader = getattr(param, "weight_loader", None)
++                    if weight_loader is not None and shard_id is not None:
++                        weight_loader(param, weight, loaded_shard_id=shard_id)
++                    elif weight_loader is not None:
++                        weight_loader(param, weight)
++                    elif param.shape == weight.shape:
++                        param.data.copy_(weight)
++                    else:
++                        tp_rank = self.rank % self.parallel_config.tensor_parallel_size
++                        for dim in range(len(param.shape)):
++                            if param.shape[dim] != weight.shape[dim]:
++                                shard_size = param.shape[dim]
++                                param.data.copy_(weight.narrow(dim, tp_rank * shard_size, shard_size))
++                                break
 +
 +            self.weight_transfer_engine.receive_weights(
 +                typed_update_info,

@@ -880,30 +880,24 @@ class VLLMEngine(RayActor):
         raise RuntimeError(f"vLLM init_weight_transfer_engine failed: {last_error}") from last_error
 
     def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
-        """``POST /start_weight_update`` — signals vLLM to enter IPC weight-update mode.
-
-        For vLLM versions that do not expose this endpoint, the call
-        is a no-op; the HCCL/NCCL distributed path does not require it.
-        """
+        """Enter IPC weight-update mode via ``/collective_rpc`` (vLLM 0.20.x colocate path)."""
         try:
-            return self._make_request("start_weight_update", {"is_checkpoint_format": is_checkpoint_format})
+            return self._make_request(
+                "collective_rpc",
+                {"method": "start_weight_update", "kwargs": {"is_checkpoint_format": is_checkpoint_format}},
+            )
         except Exception:
-            return {"ok": True, "noop": True, "note": "/start_weight_update not available in this vLLM version"}
+            return {"ok": True, "noop": True, "note": "start_weight_update collective_rpc failed"}
 
     def finish_weight_update(self) -> dict:
-        """POST /finish_weight_update - signals vLLM to exit IPC weight-update mode.
-
-        Purely a state-machine bookend now; ``_weight_version`` is recorded by
-        ``update_weights_from_tensor`` (the IPC data-carrying RPC), matching vime's
-        single-RPC version-with-data semantics.
-
-        For vLLM versions that do not expose this endpoint, the call
-        is a no-op; the HCCL/NCCL distributed path does not require it.
-        """
+        """Exit IPC weight-update mode via ``/collective_rpc``."""
         try:
-            return self._make_request("finish_weight_update", {})
+            return self._make_request(
+                "collective_rpc",
+                {"method": "finish_weight_update"},
+            )
         except Exception:
-            return {"ok": True, "noop": True, "note": "/finish_weight_update not available in this vLLM version"}
+            return {"ok": True, "noop": True, "note": "finish_weight_update collective_rpc failed"}
 
     def check_weights(self, action: str):
         """No vLLM ``weights_checker`` route; return a placeholder dict."""
