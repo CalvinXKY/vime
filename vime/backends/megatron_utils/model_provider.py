@@ -96,21 +96,25 @@ def _get_model_provider_func(
         provider.sequence_parallel = args.sequence_parallel
         provider.context_parallel_size = args.context_parallel_size
         provider.variable_seq_lengths = args.variable_seq_lengths
-        provider.gradient_accumulation_fusion = False
+        provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion
         if hasattr(args, "moe_token_dispatcher_type"):
             provider.moe_token_dispatcher_type = args.moe_token_dispatcher_type
         if getattr(args, "decoder_first_pipeline_num_layers", None) is not None:
             provider.num_layers_in_first_pipeline_stage = args.decoder_first_pipeline_num_layers
         if getattr(args, "decoder_last_pipeline_num_layers", None) is not None:
             provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
+        provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
+        provider.freeze_language_model = False
+        provider.freeze_vision_model = False
+        provider.moe_permute_fusion = args.moe_permute_fusion
+        provider.recompute_granularity = args.recompute_granularity
+        provider.recompute_method = args.recompute_method
+        provider.recompute_num_layers = args.recompute_num_layers
+        for key, value in vars(args).items():
+            if hasattr(provider, key):
+                continue
+            setattr(provider, key, value)
         provider.finalize()
-
-        # Use local layer spec when Transformer Engine is not available (e.g., NPU)
-        try:
-            import transformer_engine
-        except ImportError:
-            from megatron.bridge.models.gpt_provider import local_layer_spec
-            provider.transformer_layer_spec = local_layer_spec
 
         if role == "critic":
             _original_provide = provider.provide

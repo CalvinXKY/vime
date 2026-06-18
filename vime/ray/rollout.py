@@ -32,6 +32,7 @@ from vime.utils.types import Sample
 from ..utils.metric_utils import has_repetition
 from .rollout_validation import validate_server_group_gpu_indices
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
+from vime.utils.common import is_npu
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -105,6 +106,7 @@ class ServerGroup:
         RolloutRayActor = ray.remote(VLLMEngine)
 
         rollout_engines = []
+        device_name = "NPU" if is_npu() else "GPU"
         for i in range(len(self.all_engines)):
             if self.all_engines[i] is not None:
                 continue
@@ -124,15 +126,13 @@ class ServerGroup:
             )
 
             env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST}
-            env_vars["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(str(base_gpu_id + j) for j in range(num_gpu_per_engine))
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
-                num_gpus=0,
-                resources={"NPU": 0},
                 scheduling_strategy=scheduling_strategy,
                 runtime_env={
                     "env_vars": env_vars,
                 },
+                resources={device_name:num_gpus}
             ).remote(
                 self.args,
                 rank=global_rank,
@@ -383,7 +383,8 @@ class RolloutManager:
             self.servers = start_rollout_servers(args, pg)
 
         init_tracking(args, primary=False)
-        self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0, resources={"NPU": 0}).remote()
+        device_name = "NPU" if is_npu() else "GPU"
+        self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0, resources={device_name:0}).remote()
         self.rollout_id = -1
 
         self._health_monitors = []
@@ -964,11 +965,7 @@ def _start_router(
         else:
             router_port = args.vllm_router_port
 
-    try:
-        from vllm_router.router_args import RouterArgs
-    except ImportError:
-        logger.warning("vllm_router not installed, skipping router launch")
-        return None, None, 0
+    from vllm_router.router_args import RouterArgs
 
     from vime.utils.http_utils import run_router
 
@@ -1181,25 +1178,6 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
             update_weights=model_cfg.update_weights,
             prometheus_port=prom_port,
         )
-
-    # When vllm_router is not installed, fall back to the first engine URL
-    # so that /inference/v1/generate requests go directly to the engine.
-    for name, srv in servers.items():
-        if srv.router_ip is None or srv.router_port is None:
-            for group in srv.server_groups:
-                for engine in group.engines:
-                    url = ray.get(engine.get_url.remote()) if engine is not None else None
-                    if url is not None:
-                        from urllib.parse import urlparse
-                        parsed = urlparse(url)
-                        srv.router_ip = parsed.hostname
-                        srv.router_port = parsed.port
-                        if name == list(servers.keys())[0]:
-                            args.vllm_router_ip = srv.router_ip
-                            args.vllm_router_port = srv.router_port
-                        break
-                if srv.router_ip is not None:
-                    break
 
     # Expose per-model router info for custom rollout functions.
     args.vllm_model_routers = {name: (srv.router_ip, srv.router_port) for name, srv in servers.items()}

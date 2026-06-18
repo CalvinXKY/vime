@@ -1,4 +1,3 @@
-import logging
 import os
 
 import ray
@@ -6,8 +5,7 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
-
-logger = logging.getLogger(__name__)
+from vime.utils.common import is_npu
 
 
 class RayTrainGroup:
@@ -54,38 +52,35 @@ class RayTrainGroup:
         pg, reordered_bundle_indices, _reordered_gpu_ids = pg
 
         env_vars = {
-            "HCCL_CUMEM_ENABLE": os.environ.get("HCCL_CUMEM_ENABLE", "0"),
-            # NPU: let Ray manage ASCEND_RT_VISIBLE_DEVICES per worker
-            # **{name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST},
+            # Default NCCL_CUMEM_ENABLE to "0" to prevent intermittent NCCL
+            # init errors observed when the vLLM side disables CUMEM.
+            "NCCL_CUMEM_ENABLE": os.environ.get("NCCL_CUMEM_ENABLE", "0"),
+            "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1"),
+            **{name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST},
             **self.args.train_env_vars,
         }
 
         if self.args.offload_train and self.args.train_backend == "megatron":
-            try:
-                import torch_memory_saver
-            except ImportError:
-                torch_memory_saver = None
-                logger.warning("torch_memory_saver not installed, skipping offload train setup")
+            import torch_memory_saver
 
-            if torch_memory_saver is not None:
-                for path in [
-                    "torch_memory_saver_hook_mode_preload_cu12.abi3.so",
-                    "torch_memory_saver_hook_mode_preload.abi3.so",
-                ]:
-                    dynlib_path = os.path.join(
-                        os.path.dirname(os.path.dirname(torch_memory_saver.__file__)),
-                        path,
-                    )
-                    if os.path.exists(dynlib_path):
-                        break
-                else:
-                    raise FileNotFoundError(
-                        "Cannot find torch_memory_saver dynamic library. Please make sure torch_memory_saver is properly installed."
-                    )
+            for path in [
+                "torch_memory_saver_hook_mode_preload_cu12.abi3.so",
+                "torch_memory_saver_hook_mode_preload.abi3.so",
+            ]:
+                dynlib_path = os.path.join(
+                    os.path.dirname(os.path.dirname(torch_memory_saver.__file__)),
+                    path,
+                )
+                if os.path.exists(dynlib_path):
+                    break
+            else:
+                raise FileNotFoundError(
+                    "Cannot find torch_memory_saver dynamic library. Please make sure torch_memory_saver is properly installed."
+                )
 
-                env_vars["LD_PRELOAD"] = dynlib_path
-                env_vars["TMS_INIT_ENABLE"] = "1"
-                env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
+            env_vars["LD_PRELOAD"] = dynlib_path
+            env_vars["TMS_INIT_ENABLE"] = "1"
+            env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
 
         # We cannot do routing replay for critic.
         if self.args.use_routing_replay and self.role == "actor":
@@ -95,7 +90,8 @@ class RayTrainGroup:
 
         actor_impl = MegatronTrainRayActor
 
-        TrainRayActor = ray.remote(num_gpus=0, resources={"NPU": 1}, runtime_env={"env_vars": env_vars})(actor_impl)
+        TrainRayActor = ray.remote(runtime_env={"env_vars": env_vars})(actor_impl)
+        device_name = "NPU" if is_npu() else "GPU"
 
         # Create worker actors
         self._actor_handlers = []
@@ -103,12 +99,11 @@ class RayTrainGroup:
         for rank in range(world_size):
             actor = TrainRayActor.options(
                 num_cpus=num_gpus_per_actor,
-                num_gpus=0,
-                resources={"NPU": num_gpus_per_actor},
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_bundle_index=reordered_bundle_indices[rank],
                 ),
+                resources={device_name:num_gpus_per_actor}
             ).remote(world_size, rank, master_addr, master_port)
             if rank == 0:
                 master_addr, master_port = ray.get(actor.get_master_addr_and_port.remote())
