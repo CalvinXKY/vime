@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -40,6 +39,13 @@ def vllm_args() -> SimpleNamespace:
         use_critic=False,
         critic_num_gpus_per_node=0,
         critic_num_nodes=0,
+        seed=1234,
+        fp16=False,
+        offload_rollout=False,
+        use_rollout_routing_replay=False,
+        vllm_pipeline_parallel_size=1,
+        vllm_data_parallel_size=1,
+        vllm_dp_size=1,
     )
 
 
@@ -48,30 +54,10 @@ def vllm_engine(vllm_args):
     from vime.backends.vllm_utils.vllm_engine import VLLMEngine
 
     engine = VLLMEngine(vllm_args, rank=0)
+    engine.node_rank = 0
     engine.server_host = "127.0.0.1"
     engine.server_port = 8765
     return engine
-
-
-@pytest.fixture(autouse=True)
-def _seed_vllm_cli_action_table_cache():
-    """Skip the device-probing rebuild of the vLLM CLI action table on CPU.
-
-    ``get_vllm_cli_action_table()`` builds its table via ``AsyncEngineArgs.add_cli_args``,
-    which probes the accelerator and raises ``RuntimeError: Failed to infer device type``
-    on a GPU-less host. The table only drives which ``vllm_*`` values are forwarded to the
-    ``vllm serve`` subprocess; the cmd/topology/sleep-mode assertions in this module exercise
-    vime's own explicit flag logic, not forwarding. Seed an empty (already-built) cache so the
-    rebuild is skipped, and restore the original on teardown so we never leak across modules.
-    """
-    import vime.backends.vllm_utils.arguments as _args
-
-    saved = _args._VLLM_CLI_ACTION_TABLE_CACHE
-    _args._VLLM_CLI_ACTION_TABLE_CACHE = {}
-    try:
-        yield
-    finally:
-        _args._VLLM_CLI_ACTION_TABLE_CACHE = saved
 
 
 class _MockResponse:
@@ -107,92 +93,156 @@ def test_normalize_vllm_wake_tags_empty_becomes_none():
 
 
 @pytest.mark.unit
-def test_format_v6_uri_wraps_ipv6():
-    assert mod._format_v6_uri("2001:db8::1") == "[2001:db8::1]"
-
-
-@pytest.mark.unit
-def test_format_v6_uri_ipv4_unchanged():
-    assert mod._format_v6_uri("10.0.0.1") == "10.0.0.1"
-
-
-@pytest.mark.unit
-def test_compute_vllm_engine_topology_single_node(vllm_args):
+def test_launch_config_single_node(vllm_args):
     vllm_args.num_gpus_per_node = 8
     vllm_args.rollout_num_gpus_per_engine = 4
     vllm_args.vllm_pipeline_parallel_size = 1
-    vllm_args.vllm_tp_size = 4
-    topo = mod.compute_vllm_engine_topology(vllm_args, global_rank=0)
-    assert topo.nnodes == 1
-    assert topo.node_rank == 0
-    assert topo.local_num_gpus == 4
-    assert not topo.multi_node
-    assert not topo.headless
+    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    assert sa["nnodes"] == 1
+    assert sa["node_rank"] == 0
+    assert sa["_tp_size"] == 4
 
 
 @pytest.mark.unit
-def test_compute_vllm_engine_topology_multi_node_ranks(vllm_args):
+def test_compute_server_args_preserves_non_topology_vllm_flags(vllm_args, monkeypatch):
+    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"server_concurrency", "tool_call_parser"}))
+    vllm_args.vllm_server_concurrency = 256
+    vllm_args.vllm_tool_call_parser = "qwen3_coder"
+    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    assert sa["server_concurrency"] == 256
+    assert sa["tool_call_parser"] == "qwen3_coder"
+
+
+@pytest.mark.unit
+def test_compute_server_args_ignores_unrecognized_vllm_attrs(vllm_args, monkeypatch):
+    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"server_concurrency"}))
+    vllm_args.vllm_nonexistent_flag = "keep-out"
+    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    assert "nonexistent_flag" not in sa
+
+
+@pytest.mark.unit
+def test_launch_config_multi_node_ranks(vllm_args):
     vllm_args.num_gpus_per_node = 8
     vllm_args.rollout_num_gpus_per_engine = 16
     vllm_args.vllm_pipeline_parallel_size = 2
-    vllm_args.vllm_tp_size = 8
-    topo0 = mod.compute_vllm_engine_topology(vllm_args, global_rank=0)
-    topo1 = mod.compute_vllm_engine_topology(vllm_args, global_rank=1)
-    assert topo0.nnodes == 2
-    assert topo0.node_rank == 0
-    assert topo1.node_rank == 1
-    assert topo0.local_num_gpus == 8
-    assert topo0.headless is False
-    assert topo1.headless is True
+    sa0, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr="10.0.0.1:15000", host="10.0.0.1", port=8000)
+    sa1, _ = mod._compute_server_args(vllm_args, rank=1, dist_init_addr="10.0.0.1:15000", host="10.0.0.2", port=8000)
+    assert sa0["nnodes"] == 2
+    assert sa0["node_rank"] == 0
+    assert sa1["node_rank"] == 1
 
 
 @pytest.mark.unit
-def test_append_distributed_flags_only_when_multi_node(vllm_args):
-    cmd: list[str] = ["vllm", "serve"]
-    single = mod.VllmEngineTopology(
-        nnodes=1,
-        node_rank=0,
-        local_num_gpus=4,
-        tensor_parallel_size=4,
-        pipeline_parallel_size=1,
-    )
-    mod.append_vllm_distributed_launch_flags(cmd, single, ("10.0.0.1", 15000), vllm_args)
-    assert cmd == ["vllm", "serve"]
+def test_distributed_flags_only_when_multi_node(vllm_args):
+    vllm_args.num_gpus_per_node = 8
+    vllm_args.rollout_num_gpus_per_engine = 4
+    vllm_args.vllm_pipeline_parallel_size = 1
+    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    assert "master_addr" not in sa
 
-    cmd_multi: list[str] = ["vllm", "serve"]
-    multi = mod.VllmEngineTopology(
-        nnodes=2,
-        node_rank=1,
-        local_num_gpus=8,
-        tensor_parallel_size=8,
-        pipeline_parallel_size=2,
+    vllm_args.rollout_num_gpus_per_engine = 16
+    vllm_args.vllm_pipeline_parallel_size = 2
+    sa_multi, _ = mod._compute_server_args(
+        vllm_args, rank=1, dist_init_addr="10.0.0.2:16000", host="10.0.0.2", port=8000
     )
-    mod.append_vllm_distributed_launch_flags(cmd_multi, multi, ("10.0.0.2", 16000), vllm_args)
-    assert "--nnodes" in cmd_multi
-    assert "--node-rank" in cmd_multi
-    assert "1" in cmd_multi
-    assert "--headless" in cmd_multi
-    assert "--master-addr" in cmd_multi
-    assert "10.0.0.2" in cmd_multi
-    assert cmd_multi[cmd_multi.index("--data-parallel-backend") + 1] == "mp"
-    assert cmd_multi[cmd_multi.index("--distributed-executor-backend") + 1] == "mp"
+    assert sa_multi["nnodes"] == 2
+    assert sa_multi["node_rank"] == 1
+    assert sa_multi["master_addr"] == "10.0.0.2"
+    assert sa_multi.get("headless") is True
+    assert sa_multi.get("data_parallel_backend") == "mp"
+    assert sa_multi.get("distributed_executor_backend") == "mp"
 
 
 @pytest.mark.unit
-def test_parse_dist_init_addr_ipv6():
-    host, port = mod.parse_dist_init_addr("[2001:db8::1]:15000")
-    assert host == "2001:db8::1"
-    assert port == 15000
+def test_compute_server_args_applies_worker_type_and_bootstrap_port(vllm_args):
+    sa_prefill, _ = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        worker_type="prefill",
+        disaggregation_bootstrap_port=12345,
+    )
+    assert sa_prefill["disaggregation_mode"] == "prefill"
+
+    sa_decode, _ = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        worker_type="decode",
+    )
+    assert sa_decode["disaggregation_mode"] == "decode"
+
+
+@pytest.mark.unit
+def test_compute_server_args_prefill_requires_bootstrap_port(vllm_args):
+    with pytest.raises(AssertionError, match="disaggregation_bootstrap_port"):
+        mod._compute_server_args(
+            vllm_args,
+            rank=0,
+            dist_init_addr=None,
+            host="127.0.0.1",
+            port=8000,
+            worker_type="prefill",
+        )
+
+
+@pytest.mark.unit
+def test_compute_server_args_applies_rollout_and_dtype_flags(vllm_args):
+    vllm_args.use_rollout_routing_replay = True
+    vllm_args.fp16 = True
+    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    assert sa["enable_return_routed_experts"] is True
+    assert sa["dtype"] == "float16"
+
+
+@pytest.mark.unit
+def test_compute_server_args_applies_max_model_len_from_rollout_context(vllm_args):
+    vllm_args.rollout_max_context_len = 8192
+    vllm_args.vllm_max_model_len = None
+    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    assert sa["max_model_len"] == 8192
+
+
+@pytest.mark.unit
+def test_compute_server_args_model_path_override_wins(vllm_args, monkeypatch):
+    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"model", "server_concurrency"}))
+    sa, _ = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        vllm_overrides={"model_path": "/tmp/override", "server-concurrency": 123},
+    )
+    assert sa["model"] == "/tmp/override"
+    assert sa["server_concurrency"] == 123
+
+
+@pytest.mark.unit
+def test_compute_server_args_external_check_fields_skip_orchestration_fields(vllm_args):
+    sa, check_fields = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    assert "model" not in check_fields
+    assert "host" not in check_fields
+    assert "port" not in check_fields
+    assert "nnodes" in check_fields
+    assert "node_rank" in check_fields
+    assert "weight_transfer_config" in check_fields
+    assert sa["weight_transfer_config"] == {"backend": "nccl"}
 
 
 @pytest.mark.unit
 def test_build_vllm_subprocess_env_colocate(vllm_args, monkeypatch):
     vllm_args.colocate = True
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    env = mod.build_vllm_subprocess_env(
+    env = mod._build_subprocess_env(
         {
-            "args": vllm_args,
-            "visible_devices": "0,1",
+            "_args": vllm_args,
+            "_visible_devices": "0,1",
         }
     )
     assert "VLLM_ALLOW_INSECURE_SERIALIZATION" in env
@@ -204,7 +254,7 @@ def test_build_vllm_subprocess_env_colocate(vllm_args, monkeypatch):
 def test_build_vllm_subprocess_env_sets_batch_invariant_when_deterministic(vllm_args, monkeypatch):
     monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
     vllm_args.vllm_enable_deterministic_inference = True
-    env = mod.build_vllm_subprocess_env({"args": vllm_args, "visible_devices": "0"})
+    env = mod._build_subprocess_env({"_args": vllm_args, "_visible_devices": "0"})
     assert env["VLLM_BATCH_INVARIANT"] == "1"
 
 
@@ -212,30 +262,40 @@ def test_build_vllm_subprocess_env_sets_batch_invariant_when_deterministic(vllm_
 def test_build_vllm_subprocess_env_no_batch_invariant_by_default(vllm_args, monkeypatch):
     monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
     vllm_args.vllm_enable_deterministic_inference = False
-    env = mod.build_vllm_subprocess_env({"args": vllm_args, "visible_devices": "0"})
+    env = mod._build_subprocess_env({"_args": vllm_args, "_visible_devices": "0"})
     assert "VLLM_BATCH_INVARIANT" not in env
 
 
 @pytest.mark.unit
-def test_build_vllm_cmd_adds_sleep_mode_only_for_offload_rollout(vllm_args):
+def test_build_vllm_subprocess_env_sets_disaggregation_side_channel(vllm_args):
+    env = mod._build_subprocess_env(
+        {
+            "_args": vllm_args,
+            "_visible_devices": "0",
+            "_worker_type": "prefill",
+            "_disaggregation_bootstrap_port": 29999,
+            "node_rank": 0,
+            "host": "10.0.0.8",
+        }
+    )
+    assert env["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "10.0.0.8"
+    assert env["VLLM_NIXL_SIDE_CHANNEL_PORT"] == "29999"
+
+
+@pytest.mark.unit
+def test_compute_server_args_adds_sleep_mode_for_offload_rollout(vllm_args):
     vllm_args.offload_rollout = True
-    server_args = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
-
-    cmd, _ = mod.build_vllm_cmd_and_env(server_args)
-
-    assert "--enable-sleep-mode" in cmd
+    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    assert sa.get("enable_sleep_mode") is True
     assert vllm_args.vllm_enable_sleep_mode is True
 
 
 @pytest.mark.unit
-def test_build_vllm_cmd_does_not_infer_sleep_mode_from_colocate(vllm_args):
+def test_compute_server_args_no_sleep_mode_from_colocate(vllm_args):
     vllm_args.colocate = True
     vllm_args.offload_rollout = False
-    server_args = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
-
-    cmd, _ = mod.build_vllm_cmd_and_env(server_args)
-
-    assert "--enable-sleep-mode" not in cmd
+    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    assert "enable_sleep_mode" not in sa
     assert not getattr(vllm_args, "vllm_enable_sleep_mode", False)
 
 
@@ -354,11 +414,11 @@ def test_get_weight_version_worker_rank_returns_none_without_raise(vllm_engine):
 def test_update_weights_from_distributed_posts_update_weights_without_checkpoint_flag(vllm_engine, monkeypatch):
     calls: list[dict] = []
 
-    def fake_post_vllm(update_info: dict) -> dict:
-        calls.append(update_info)
+    def fake_make_request(endpoint: str, payload: dict) -> dict:
+        calls.append(payload.get("update_info", payload))
         return {"ok": True}
 
-    monkeypatch.setattr(vllm_engine, "_post_vllm_update_weights_http", fake_post_vllm)
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_make_request)
 
     names = ["layer.0.weight"]
     dtypes = [torch.float32]
@@ -384,79 +444,9 @@ def test_update_weights_from_distributed_posts_update_weights_without_checkpoint
 
 
 @pytest.mark.unit
-def test_post_vllm_update_weights_http_wraps_update_info(vllm_engine, monkeypatch):
-    seen: list[tuple] = []
-
-    def fake_post(endpoint: str, payload: dict):
-        seen.append((endpoint, payload))
-        return {"status": "ok"}
-
-    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
-
-    result = vllm_engine._post_vllm_update_weights_http({"names": ["w"], "packed": False})
-
-    assert result == {"status": "ok"}
-    assert seen[0][0] == "update_weights"
-    assert seen[0][1] == {"update_info": {"names": ["w"], "packed": False}}
-
-
-@pytest.mark.unit
-def test_response_json_parses_dict():
-    response = _MockResponse(json_data={"status": "ready"})
-    assert mod._response_json(response) == {"status": "ready"}
-
-
-@pytest.mark.unit
-def test_response_json_empty_body_returns_ok():
-    response = _MockResponse(text="")
-    assert mod._response_json(response) == {"ok": True}
-
-
-@pytest.mark.unit
-def test_response_json_invalid_json_raises():
-    response = _MockResponse(text="not-json")
-    response.json = lambda: (_ for _ in ()).throw(ValueError("no json"))  # type: ignore[method-assign]
-    with pytest.raises(ValueError, match="no json"):
-        mod._response_json(response)
-
-
-@pytest.mark.unit
-def test_response_json_http_error_adds_response_text_note():
-    response = _MockResponse(json_data={"error": "bad"}, text="server exploded", status_code=500)
-    with pytest.raises(requests.exceptions.HTTPError) as exc_info:
-        mod._response_json(response)
-    assert "response.text='server exploded'" in exc_info.value.__notes__
-
-
-@pytest.mark.unit
-def test_http_base_ipv6_host(vllm_engine):
+def test_get_url_ipv6_host(vllm_engine):
     vllm_engine.server_host = "[2001:db8::1]"
-    assert vllm_engine._http_base() == "http://[2001:db8::1]:8765"
-
-
-@pytest.mark.unit
-def test_redact_cmd_for_log_masks_hf_token():
-    cmd = ["vllm", "serve", "model", "--hf-token", "secret-token", "--port", "8000"]
-    logged = mod.redact_cmd_for_log(cmd)
-    assert "secret-token" not in logged
-    assert "***" in logged
-
-
-@pytest.mark.unit
-def test_serialize_for_cli_primitives():
-    assert mod.serialize_for_cli(42) == "42"
-    assert mod.serialize_for_cli(True) == "True"
-    assert mod.serialize_for_cli({"backend": "nccl"}) == json.dumps({"backend": "nccl"})
-
-
-@pytest.mark.unit
-def test_serialize_for_cli_dataclass():
-    @dataclasses.dataclass
-    class _Cfg:
-        backend: str = "nccl"
-
-    out = mod.serialize_for_cli(_Cfg())
-    assert json.loads(out) == {"backend": "nccl"}
+    assert vllm_engine.get_url() == "http://[2001:db8::1]:8765"
 
 
 @pytest.mark.unit
@@ -490,6 +480,20 @@ def test_resume_memory_occupation_wake_tags_query(vllm_engine, monkeypatch):
 
     assert len(seen) == 1
     assert seen[0][1] == [("tags", "weights")]
+
+
+@pytest.mark.unit
+def test_resume_memory_occupation_returns_none_for_unsupported_tags(vllm_engine, monkeypatch):
+    seen: list[tuple] = []
+
+    def fake_post(url, *, params=None, timeout=30, json=None):
+        seen.append((url, params, timeout, json))
+        return _MockResponse(json_data={"ok": True})
+
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+
+    assert vllm_engine.resume_memory_occupation(tags=["cuda_graph"]) == {"ok": True}
+    assert seen[0][1] is None
 
 
 @pytest.mark.unit
@@ -530,17 +534,14 @@ def test_resume_memory_occupation_posts_wake_even_when_sleep_disabled(vllm_engin
 
 
 @pytest.mark.unit
-def test_init_weights_update_group_retries_then_succeeds(vllm_engine, monkeypatch):
-    attempts = {"n": 0}
+def test_init_weights_update_group_posts_init_info(vllm_engine, monkeypatch):
+    calls: list[tuple] = []
 
     def fake_post(endpoint: str, payload: dict):
-        attempts["n"] += 1
-        if attempts["n"] < 2:
-            raise requests.ConnectionError("transient")
+        calls.append((endpoint, payload))
         return {"initialized": True}
 
     monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
-    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
 
     result = vllm_engine.init_weights_update_group(
         "127.0.0.1",
@@ -552,78 +553,35 @@ def test_init_weights_update_group_retries_then_succeeds(vllm_engine, monkeypatc
     )
 
     assert result == {"initialized": True}
-    assert attempts["n"] == 2
+    assert len(calls) == 1
+    assert calls[0][0] == "init_weight_transfer_engine"
+    assert calls[0][1]["init_info"]["master_address"] == "127.0.0.1"
+    assert calls[0][1]["init_info"]["rank_offset"] == 1
 
 
 @pytest.mark.unit
-def test_init_weights_update_group_raises_after_three_failures(vllm_engine, monkeypatch):
-    monkeypatch.setattr(
-        vllm_engine,
-        "_make_request",
-        lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("down")),
-    )
-    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+def test_update_weights_from_disk_posts_collective_rpc(vllm_engine, monkeypatch):
+    seen: list[tuple] = []
 
-    with pytest.raises(RuntimeError, match="init_weight_transfer_engine failed"):
-        vllm_engine.init_weights_update_group(
-            "127.0.0.1",
-            29500,
-            rank_offset=1,
-            world_size=4,
-            group_name="g",
-            backend="nccl",
-        )
+    def fake_post(url, *, params=None, timeout=30, json=None):
+        seen.append((url, params, timeout, json))
+        return _MockResponse(json_data={"reloaded": True})
 
+    monkeypatch.setattr(mod.requests, "post", fake_post)
 
-def _stub_server_info(monkeypatch, parallel_config: dict) -> None:
-    def fake_get(url, *, params=None, timeout=30):
-        return _MockResponse(json_data={"vllm_config": {"parallel_config": parallel_config}})
-
-    monkeypatch.setattr(mod.requests, "get", fake_get)
+    assert vllm_engine.update_weights_from_disk("/tmp/model") == {"reloaded": True}
+    assert seen[0][0] == "http://127.0.0.1:8765/collective_rpc"
+    assert seen[0][3]["method"] == "reload_weights"
 
 
 @pytest.mark.unit
-def test_sanity_check_external_server_args_passes_on_match(vllm_engine, monkeypatch):
-    vllm_engine._server_args = {"tp_size": 2, "pp_size": 1, "dp_size": 1, "nnodes": 1}
-    _stub_server_info(
-        monkeypatch,
-        {"tensor_parallel_size": 2, "pipeline_parallel_size": 1, "data_parallel_size": 1, "nnodes": 1},
-    )
-    # All reported fields match the per-engine expectation → no raise.
-    vllm_engine._sanity_check_external_server_args()
+def test_update_weights_from_disk_surfaces_http_error(vllm_engine, monkeypatch):
+    def fake_post(url, *, params=None, timeout=30, json=None):
+        return _MockResponse(text="boom", status_code=500)
 
-
-@pytest.mark.unit
-def test_sanity_check_external_server_args_raises_on_tp_mismatch(vllm_engine, monkeypatch):
-    # Expect a tp=2 engine but the external server reports tp=1 → fail fast (the bug class
-    # that used to only warn and then hang the weight-sync rendezvous 300s later).
-    vllm_engine._server_args = {"tp_size": 2, "pp_size": 1, "dp_size": 1, "nnodes": 1}
-    _stub_server_info(
-        monkeypatch,
-        {"tensor_parallel_size": 1, "pipeline_parallel_size": 1, "data_parallel_size": 1, "nnodes": 1},
-    )
-    with pytest.raises(AssertionError, match="tp_size"):
-        vllm_engine._sanity_check_external_server_args()
-
-
-@pytest.mark.unit
-def test_sanity_check_external_server_args_skips_unreported_field(vllm_engine, monkeypatch):
-    # vLLM /server_info may not surface ``nnodes``: an unreported (None) field is skipped,
-    # not treated as a mismatch — so a single-node external engine doesn't false-fail.
-    vllm_engine._server_args = {"tp_size": 1, "pp_size": 1, "dp_size": 1, "nnodes": 2}
-    _stub_server_info(
-        monkeypatch,
-        {"tensor_parallel_size": 1, "pipeline_parallel_size": 1, "data_parallel_size": 1},
-    )
-    vllm_engine._sanity_check_external_server_args()
-
-
-@pytest.mark.unit
-def test_sanity_check_external_server_args_raises_when_parallel_config_missing(vllm_engine, monkeypatch):
-    vllm_engine._server_args = {"tp_size": 1, "pp_size": 1, "dp_size": 1, "nnodes": 1}
-    _stub_server_info(monkeypatch, {})
-    with pytest.raises(RuntimeError, match="missing vllm_config.parallel_config"):
-        vllm_engine._sanity_check_external_server_args()
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+    with pytest.raises(requests.exceptions.HTTPError):
+        vllm_engine.update_weights_from_disk("/tmp/model")
 
 
 @pytest.mark.unit
@@ -633,20 +591,20 @@ def test_resolve_parallel_sizes_is_per_engine_not_global(vllm_args):
     vllm_args.rollout_num_gpus_per_engine = 1
     vllm_args.vllm_pipeline_parallel_size = 1
     vllm_args.vllm_tp_size = 1  # stale global; must be ignored now
-    tp, pp = mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=2)
+    tp, pp, dp = mod._resolve_parallel_sizes(vllm_args, gpus_per_engine=2)
     assert (tp, pp) == (2, 1)
 
 
 @pytest.mark.unit
-def test_compute_topology_heterogeneous_per_group_tp(vllm_args):
-    # Reproduces the rendezvous bug's root: global=1 but a per-group engine uses 2 GPUs.
+def test_launch_config_heterogeneous_per_group_tp(vllm_args):
     vllm_args.num_gpus_per_node = 8
     vllm_args.rollout_num_gpus_per_engine = 1
     vllm_args.vllm_pipeline_parallel_size = 1
-    vllm_args.vllm_tp_size = 1  # stale global
-    topo = mod.compute_vllm_engine_topology(vllm_args, global_rank=0, num_gpus_per_engine=2)
-    assert topo.tensor_parallel_size == 2
-    assert topo.nnodes == 1
+    sa, _ = mod._compute_server_args(
+        vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000, num_gpus_per_engine=2
+    )
+    assert sa["_tp_size"] == 2
+    assert sa["nnodes"] == 1
 
 
 @pytest.mark.unit
@@ -656,7 +614,7 @@ def test_resolve_parallel_sizes_dp_consumes_gpus(vllm_args):
     vllm_args.vllm_pipeline_parallel_size = 1
     vllm_args.vllm_data_parallel_size = 2
     vllm_args.vllm_dp_size = 2
-    tp, pp = mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=4)
+    tp, pp, dp = mod._resolve_parallel_sizes(vllm_args, gpus_per_engine=4)
     assert (tp, pp) == (2, 1)
 
 
@@ -666,7 +624,7 @@ def test_resolve_parallel_sizes_dp_and_pp_combined(vllm_args):
     vllm_args.vllm_pipeline_parallel_size = 2
     vllm_args.vllm_data_parallel_size = 2
     vllm_args.vllm_dp_size = 2
-    tp, pp = mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=8)
+    tp, pp, dp = mod._resolve_parallel_sizes(vllm_args, gpus_per_engine=8)
     assert (tp, pp) == (2, 2)
 
 
@@ -677,7 +635,7 @@ def test_resolve_parallel_sizes_rejects_indivisible_dp(vllm_args):
     vllm_args.vllm_data_parallel_size = 2
     vllm_args.vllm_dp_size = 2
     with pytest.raises(ValueError, match="divisible"):
-        mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=3)
+        mod._resolve_parallel_sizes(vllm_args, gpus_per_engine=3)
 
 
 @pytest.mark.unit
@@ -690,28 +648,6 @@ def test_make_request_short_circuits_on_headless(vllm_engine, monkeypatch):
     monkeypatch.setattr(mod.requests, "post", _boom)
     vllm_engine.node_rank = 1
     assert vllm_engine._make_request("whatever", {}) is None
-
-
-@pytest.mark.unit
-def test_control_plane_methods_noop_on_headless_worker(vllm_engine, monkeypatch):
-    """node_rank>0 (headless) workers own no HTTP server; every control-plane method must
-    no-op (return None) without issuing an HTTP request."""
-
-    def _boom(*a, **k):
-        raise AssertionError("control-plane HTTP must not be called on a headless worker")
-
-    monkeypatch.setattr(mod.requests, "post", _boom)
-    monkeypatch.setattr(mod.requests, "get", _boom)
-    vllm_engine.node_rank = 1
-    vllm_engine.args.vllm_enable_sleep_mode = True
-
-    assert vllm_engine.init_weight_transfer_engine({"init_info": {}}) is None
-    assert vllm_engine.start_weight_update() is None
-    assert vllm_engine.finish_weight_update() is None
-    assert vllm_engine.init_weights_update_group("addr", 1, 0, 4, "g", "nccl") is None
-    assert vllm_engine.update_weights_from_distributed(["w"], [torch.float32], [[1]], "g") is None
-    assert vllm_engine.release_memory_occupation() is None
-    assert vllm_engine.resume_memory_occupation() is None
 
 
 if __name__ == "__main__":

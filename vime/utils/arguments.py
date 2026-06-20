@@ -1849,16 +1849,6 @@ def vime_validate_args(args):
             if hasattr(args, k):
                 logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
             setattr(args, k, v)
-            # vllm launch_server_process distinguishes "user-supplied value" from
-            # "argparse default" via ``args._vllm_user_provided``. YAML overrides
-            # bypass argparse, so we register them explicitly here — without this,
-            # YAML values that happen to equal the vllm-side default (e.g.
-            # ``vllm_gpu_memory_utilization: 0.92``) would be treated as "default"
-            # and silently replaced by vime's preferred value.
-            if isinstance(k, str) and k.startswith("vllm_"):
-                if not hasattr(args, "_vllm_user_provided"):
-                    args._vllm_user_provided = set()
-                args._vllm_user_provided.add(k)
 
     if args.eval_max_context_len is None:
         logger.info(
