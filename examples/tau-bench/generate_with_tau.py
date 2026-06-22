@@ -22,7 +22,7 @@ _inflight_sem: asyncio.Semaphore | None = None
 # Agent rollout uses vLLM; only user_model / user_model_provider affect the user simulator here.
 TAU_CONFIGS = {
     "env": "retail",  # Select between ["retail", "airline"]
-    "agent": "tool-calling",  # Select between ["tool-calling", "act", "react", "few-shot"]
+    "agent_strategy": "tool-calling",  # Select between ["tool-calling", "act", "react", "few-shot"]
     # Default: local vLLM user sim (no external API). For Gemini API user sim, switch to:
     # "user_model": "gemini-2.5-flash-lite", "user_model_provider": "gemini",
     "user_model": "openai/local-qwen3-4b",
@@ -69,7 +69,7 @@ def resolve_tau_config(args: Any) -> RunConfig:
 
     return RunConfig(
         env=tau_config.env,
-        agent=tau_config.agent,
+        agent_strategy=tau_config.agent_strategy,
         user_model=user_model,
         user_model_provider=user_model_provider,
         task_split=tau_config.task_split,
