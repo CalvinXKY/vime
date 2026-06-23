@@ -23,7 +23,7 @@ import os
 import subprocess
 
 GPU_QUEUE = "mithril-h100-pool"
-CI_IMAGE = "inferactinc/public:vime-latest"
+CI_IMAGE = "vllm/vime:latest"
 HF_CACHE_HOST_PATH = "/mnt/hf-cache"
 HF_HOME = "/root/.cache/huggingface"
 NODE_INSTANCE_TYPE = "gpu-h100-sxm"

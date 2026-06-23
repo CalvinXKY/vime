@@ -25,12 +25,12 @@
 
 ```shell
 # 拉取最新镜像
-docker pull inferactinc/public:vime-latest
+docker pull vllm/vime:latest
 
 # 启动容器
 docker run --rm --gpus all --ipc=host --shm-size=16g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  -it inferactinc/public:vime-latest /bin/bash
+  -it vllm/vime:latest /bin/bash
 ```
 
 ### 安装 vime
