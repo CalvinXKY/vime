@@ -366,7 +366,7 @@ def build_vllm_subprocess_env(server_args: dict[str, Any]) -> dict[str, str]:
         if cann_python_path is not None:
             prepend_pythonpath(env, cann_python_path)
         if getattr(args, "colocate", False):
-            env.pop("PYTORCH_NPU_ALLOC_CONF", None)
+            env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
     else:
         env["CUDA_VISIBLE_DEVICES"] = server_args["visible_devices"]
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")

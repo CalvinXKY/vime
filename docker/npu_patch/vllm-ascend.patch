@@ -37,3 +37,18 @@ index 63ee94c..4e81943 100644
          self.available_kv_cache_memory_bytes = (
              self.requested_memory - profile_result.non_kv_cache_memory - npugraph_memory_estimate_applied
          )
+diff --git a/vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py b/vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py
+index 0000000..0000000 100644
+--- a/vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py
++++ b/vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py
+@@ -116,8 +116,8 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
+     init_info_cls = NPUIPCWeightTransferInitInfo
+     update_info_cls = NPUIPCWeightTransferUpdateInfo
+ 
+-    def __init__(self, config: WeightTransferConfig, parallel_config: ParallelConfig) -> None:
+-        super().__init__(config, parallel_config)
++    def __init__(self, config: WeightTransferConfig, parallel_config: ParallelConfig, model: torch.nn.Module = None) -> None:
++        super().__init__(config, parallel_config, model)
+ 
+     def parse_update_info(self, update_dict: dict[str, Any]) -> NPUIPCWeightTransferUpdateInfo:
+         """Parse update dict, deserializing pickled IPC handles if present.

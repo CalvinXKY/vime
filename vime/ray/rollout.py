@@ -131,7 +131,7 @@ class ServerGroup:
                 if cann_python_path is not None:
                     prepend_pythonpath(env_vars, cann_python_path)
                 if self.args.colocate:
-                    env_vars["PYTORCH_NPU_ALLOC_CONF"] = ""
+                    env_vars["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
                 env_vars["VLLM_USE_AOT_COMPILE"] = "0"
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,

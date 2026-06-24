@@ -8,10 +8,25 @@ import numpy as np
 import ray
 import torch
 import torch.distributed as dist
+
 from vime.utils.common import is_npu
 
 if is_npu():
+    import importlib
+
+    importlib.import_module("vime.backends.megatron_utils.npu_attention_patch")
     from mindspeed.megatron_adaptor import repatch
+
+    _orig_npu_empty_cache = torch.npu.empty_cache
+
+    def _safe_empty_cache():
+        try:
+            _orig_npu_empty_cache()
+        except RuntimeError:
+            pass
+
+    torch.npu.empty_cache = _safe_empty_cache
+    torch.cuda.empty_cache = _safe_empty_cache
 from megatron.core import mpu
 from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
