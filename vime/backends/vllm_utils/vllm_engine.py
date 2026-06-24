@@ -24,7 +24,7 @@ import requests
 
 from vime.backends.vllm_utils.arguments import SKIPPED_DESTS, get_vllm_cli_action_table
 from vime.ray.ray_actor import RayActor
-from vime.utils.common import is_npu
+from vime.utils.common import get_cann_python_site_packages, is_npu, prepend_pythonpath
 from vime.utils.http_utils import get_host_info
 
 logger = logging.getLogger(__name__)
@@ -361,6 +361,12 @@ def build_vllm_subprocess_env(server_args: dict[str, Any]) -> dict[str, str]:
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     if is_npu():
         env["ASCEND_RT_VISIBLE_DEVICES"] = server_args["visible_devices"]
+        env["VLLM_USE_AOT_COMPILE"] = "0"
+        cann_python_path = get_cann_python_site_packages()
+        if cann_python_path is not None:
+            prepend_pythonpath(env, cann_python_path)
+        if getattr(args, "colocate", False):
+            env.pop("PYTORCH_NPU_ALLOC_CONF", None)
     else:
         env["CUDA_VISIBLE_DEVICES"] = server_args["visible_devices"]
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")

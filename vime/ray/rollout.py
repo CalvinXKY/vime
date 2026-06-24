@@ -21,7 +21,7 @@ GPU_MEMORY_TYPE_WEIGHTS = "weights"
 GPU_MEMORY_TYPE_CUDA_GRAPH = "cuda_graph"
 from vime.rollout.base_types import call_rollout_fn
 from vime.utils import logging_utils
-from vime.utils.common import is_npu
+from vime.utils.common import get_cann_python_site_packages, is_npu, prepend_pythonpath
 from vime.utils.dp_schedule import build_dp_schedule
 from vime.utils.health_monitor import RolloutHealthMonitor
 from vime.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info, init_http_client
@@ -126,6 +126,13 @@ class ServerGroup:
             )
 
             env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST}
+            if is_npu():
+                cann_python_path = get_cann_python_site_packages()
+                if cann_python_path is not None:
+                    prepend_pythonpath(env_vars, cann_python_path)
+                if self.args.colocate:
+                    env_vars["PYTORCH_NPU_ALLOC_CONF"] = ""
+                env_vars["VLLM_USE_AOT_COMPILE"] = "0"
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
                 scheduling_strategy=scheduling_strategy,

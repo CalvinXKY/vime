@@ -5,7 +5,7 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
-from vime.utils.common import is_npu
+from vime.utils.common import get_cann_python_site_packages, is_npu, prepend_pythonpath
 
 
 class RayTrainGroup:
@@ -81,6 +81,16 @@ class RayTrainGroup:
             env_vars["LD_PRELOAD"] = dynlib_path
             env_vars["TMS_INIT_ENABLE"] = "1"
             env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
+
+            if is_npu():
+                env_vars["TMS_HOOK_MODE"] = "torch"
+                env_vars["TMS_REGION_TAG"] = "training"
+                env_vars["TMS_ENABLE_CPU_BACKUP"] = "1"
+                if self.args.colocate:
+                    env_vars.pop("PYTORCH_NPU_ALLOC_CONF", None)
+                cann_python_path = get_cann_python_site_packages()
+                if cann_python_path is not None:
+                    prepend_pythonpath(env_vars, cann_python_path)
 
         # We cannot do routing replay for critic.
         if self.args.use_routing_replay and self.role == "actor":
