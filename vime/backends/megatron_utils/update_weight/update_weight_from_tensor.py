@@ -62,9 +62,9 @@ def _current_gpu_uuid() -> str:
     if is_npu():
         device_index = torch.npu.current_device()
         props = torch.npu.get_device_properties(device_index)
-    else:
-        device_index = torch.cuda.current_device()
-        props = torch.cuda.get_device_properties(device_index)
+        return str(getattr(props, "uuid", f"npu:{device_index}"))
+    device_index = torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(device_index)
     return str(props.uuid)
 
 
@@ -634,7 +634,8 @@ class vLLMColocateWorkerExtension:
 
         if is_npu():
             device_index = torch.npu.current_device()
-            physical_gpu_id = str(torch.npu.get_device_properties(device_index).uuid)
+            props = torch.npu.get_device_properties(device_index)
+            physical_gpu_id = str(getattr(props, "uuid", f"npu:{device_index}"))
         else:
             device_index = torch.cuda.current_device()
             physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
