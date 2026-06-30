@@ -154,7 +154,7 @@ mem_agent_launch_train() {
   if [[ "${RUN_TRAIN_DIRECT:-0}" == "1" && -n "${RUN_TRAIN_DIRECT_PY:-}" && -f "${RUN_TRAIN_DIRECT_PY}" ]]; then
     export VIME_ROOT NCCL_NVLS_ENABLE MEM_CHUNK_TOKENS MEM_MAX_MEMORY MEM_MAX_FINAL MEM_MAX_CHUNKS
     python3 "${RUN_TRAIN_DIRECT_PY}" \
-      ${MODEL_ARGS[@]} \
+      "${MODEL_ARGS[@]}" \
       "${CKPT_ARGS[@]}" \
       "${ROLLOUT_ARGS[@]}" \
       "${OPTIMIZER_ARGS[@]}" \
@@ -192,7 +192,7 @@ mem_agent_launch_train() {
     --runtime-env-json="${runtime_env}" \
     -- python3 train.py \
       --train-backend megatron \
-      ${MODEL_ARGS[@]} \
+      "${MODEL_ARGS[@]}" \
       "${CKPT_ARGS[@]}" \
       "${ROLLOUT_ARGS[@]}" \
       "${OPTIMIZER_ARGS[@]}" \

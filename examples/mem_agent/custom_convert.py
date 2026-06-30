@@ -9,6 +9,13 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def _sample_has_rollout_log_probs(sample) -> bool:
+    meta = sample.train_metadata
+    if meta and "turns" in meta:
+        return any(t.get("rollout_log_probs") is not None for t in meta["turns"])
+    return sample.rollout_log_probs is not None
+
+
 def custom_convert(args, samples):
     raw_rewards = [s.get_reward_value(args) for s in samples]
     rewards_tensor = torch.tensor(raw_rewards, dtype=torch.float)
@@ -41,11 +48,18 @@ def custom_convert(args, samples):
     truncated_list = []
     sample_indices = []
     rollout_log_probs_list = []
-    has_rollout_log_probs = False
+    has_rollout_log_probs = any(
+        _sample_has_rollout_log_probs(s) for s in samples if s.status not in (s.Status.FAILED, s.Status.ABORTED)
+    )
 
     for i, sample in enumerate(samples):
+        if sample.status in (sample.Status.FAILED, sample.Status.ABORTED):
+            continue
+
         meta = sample.train_metadata
         if meta is None or "turns" not in meta:
+            if not sample.tokens:
+                continue
             tokens_list.append(sample.tokens)
             response_lengths.append(sample.response_length)
             lm = sample.loss_mask if sample.loss_mask is not None else [1] * sample.response_length
@@ -56,12 +70,16 @@ def custom_convert(args, samples):
             raw_reward_list.append(raw_rewards[i])
             truncated_list.append(1 if sample.status == sample.Status.TRUNCATED else 0)
             sample_indices.append(sample.index)
-            if sample.rollout_log_probs is not None:
-                rollout_log_probs_list.append(sample.rollout_log_probs)
-                has_rollout_log_probs = True
+            if has_rollout_log_probs:
+                lp = sample.rollout_log_probs
+                if lp is None:
+                    lp = [0.0] * sample.response_length
+                rollout_log_probs_list.append(lp)
             continue
 
         turns = meta["turns"]
+        if not turns:
+            continue
         norm_reward = normalized_rewards[i] / len(turns)
         is_truncated = 1 if sample.status == sample.Status.TRUNCATED else 0
 
@@ -76,9 +94,11 @@ def custom_convert(args, samples):
             raw_reward_list.append(raw_rewards[i])
             truncated_list.append(is_truncated)
             sample_indices.append(sample.index)
-            if turn.get("rollout_log_probs"):
-                rollout_log_probs_list.append(turn["rollout_log_probs"])
-                has_rollout_log_probs = True
+            if has_rollout_log_probs:
+                lp = turn.get("rollout_log_probs")
+                if lp is None:
+                    lp = [0.0] * turn["response_length"]
+                rollout_log_probs_list.append(lp)
 
     gbs = args.global_batch_size
     total = len(tokens_list)

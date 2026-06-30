@@ -341,7 +341,7 @@ async def run_eval(data: list[dict], args: argparse.Namespace, tokenizer) -> Non
             return None
 
         gold = item["answers"][0] if item.get("answers") else ""
-        pred = _extract_boxed(response[-300:].lower()) or ""
+        pred = _extract_boxed(response[-300:]) or ""
 
         result = {
             "_id": item["_id"],

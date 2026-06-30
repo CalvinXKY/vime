@@ -38,13 +38,13 @@ import json
 import sys
 from pathlib import Path
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 
 def _to_json_safe(obj):
-    try:
-        import numpy as np
-    except ImportError:
-        np = None
-
     if np is not None:
         if isinstance(obj, np.ndarray):
             return obj.tolist()

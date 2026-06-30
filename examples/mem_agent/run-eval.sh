@@ -72,13 +72,22 @@ wait_for_server() {
   local url="http://${SERVE_HOST}:${SERVE_PORT}/v1/models"
   log "Waiting for vLLM at ${url} ..."
   local attempts=0
+  local max_attempts=120
   while true; do
+    if [[ -n "${VLLM_PID:-}" ]] && ! kill -0 "${VLLM_PID}" 2>/dev/null; then
+      log "ERROR: vLLM process (PID ${VLLM_PID}) died. See ${VLLM_LOG:-server log}."
+      exit 1
+    fi
     resp=$(curl -sf --max-time 10 "${url}" 2>/dev/null || true)
     if echo "${resp}" | grep -Fq "${MODEL_NAME}" 2>/dev/null; then
       log "vLLM ready."
       break
     fi
     attempts=$((attempts + 1))
+    if (( attempts >= max_attempts )); then
+      log "ERROR: vLLM not ready after ${max_attempts} attempts."
+      exit 1
+    fi
     if (( attempts % 6 == 0 )); then
       found=$(echo "${resp}" | grep -o '"id":"[^"]*"' 2>/dev/null | head -3 || echo "(no response)")
       log "Still waiting... models: ${found}"

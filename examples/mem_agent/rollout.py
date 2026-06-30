@@ -244,7 +244,7 @@ async def reward_func(args: Any, sample: Any, **kwargs) -> dict:
         label = str(sample.label) if sample.label is not None else ""
         ground_truth = [label] if label else []
 
-    solution_str = final_output[-300:].lower()
+    solution_str = final_output[-300:]
     pred = _extract_boxed(solution_str) or ""
 
     score = 0.0
@@ -254,7 +254,7 @@ async def reward_func(args: Any, sample: Any, **kwargs) -> dict:
             boxed = _last_boxed_only_string(solution_str)
             if boxed is not None:
                 answer = _remove_boxed(boxed)
-                if _is_equiv(answer, gt_lower):
+                if _is_equiv(answer.lower(), gt_lower):
                     score = 1.0
                     break
         except Exception:
