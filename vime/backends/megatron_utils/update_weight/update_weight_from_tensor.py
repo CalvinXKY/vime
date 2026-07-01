@@ -36,10 +36,84 @@ from .update_weight_from_distributed import (
 )
 
 
+def _patch_npu_colocate_worker() -> None:
+    """Skip layerwise_reload in NPUWorker weight-update hooks (colocate OOM fix)."""
+    try:
+        from vllm_ascend.worker.worker import NPUWorker
+    except ImportError:
+        return
+
+    if getattr(NPUWorker, "_vime_colocate_patched", False):
+        return
+
+    def _patched_start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+        self._weight_update_active = True
+        self._is_checkpoint_format = is_checkpoint_format
+
+    def _patched_finish_weight_update(self) -> None:
+        self._weight_update_active = False
+
+    NPUWorker.start_weight_update = _patched_start_weight_update  # type: ignore[method-assign]
+    NPUWorker.finish_weight_update = _patched_finish_weight_update  # type: ignore[method-assign]
+    NPUWorker._vime_colocate_patched = True  # type: ignore[attr-defined]
+
+
 def _current_gpu_uuid() -> str:
+    if is_npu():
+        device_index = torch.npu.current_device()
+        props = torch.npu.get_device_properties(device_index)
+        return str(getattr(props, "uuid", f"npu:{device_index}"))
     device_index = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device_index)
     return str(props.uuid)
+
+
+def _load_colocate_weights_direct(
+    model: torch.nn.Module,
+    weights: list[tuple[str, torch.Tensor]],
+    *,
+    tp_rank: int,
+) -> None:
+    """Load HF-named weights into vLLM packed params (qkv_proj, gate_up_proj, etc.)."""
+    from vllm.model_executor.utils import get_packed_modules_mapping
+
+    packed_map = get_packed_modules_mapping(model)
+    sub_to_packed = {}
+    for packed_name, sub_names in packed_map.items():
+        for idx, sub_name in enumerate(sub_names):
+            sub_to_packed[sub_name] = (packed_name, idx)
+    qkv_shard_ids = {"q_proj": "q", "k_proj": "k", "v_proj": "v"}
+
+    def _remap_and_get_shard_id(hf_name: str) -> tuple[str, object | None]:
+        parts = hf_name.split(".")
+        shard_id = None
+        for i in range(len(parts)):
+            if parts[i] in sub_to_packed:
+                packed_name, idx = sub_to_packed[parts[i]]
+                shard_id = qkv_shard_ids.get(parts[i], idx)
+                parts[i] = packed_name
+                break
+        return ".".join(parts), shard_id
+
+    for name, weight in weights:
+        remapped, shard_id = _remap_and_get_shard_id(name)
+        try:
+            param = model.get_parameter(remapped)
+        except AttributeError:
+            continue
+        weight_loader = getattr(param, "weight_loader", None)
+        if weight_loader is not None and shard_id is not None:
+            weight_loader(param, weight, loaded_shard_id=shard_id)
+        elif weight_loader is not None:
+            weight_loader(param, weight)
+        elif param.shape == weight.shape:
+            param.data.copy_(weight)
+        else:
+            for dim in range(len(param.shape)):
+                if param.shape[dim] != weight.shape[dim]:
+                    shard_size = param.shape[dim]
+                    param.data.copy_(weight.narrow(dim, tp_rank * shard_size, shard_size))
+                    break
 
 
 def _build_ipc_update_info_from_named_tensors(
@@ -283,8 +357,10 @@ class UpdateWeightFromTensor:
         dist.barrier(group=get_gloo_group())
 
         # vLLM #39212: enter weight-update mode on each slot leader.
+        # NPU colocate: direct param loading avoids layerwise_reload + checkpoint remap issues.
+        is_checkpoint_format = not is_npu()
         if self._ipc_engine is not None and rank == self._ipc_gather_src:
-            ray.get(self._ipc_engine.start_weight_update.remote(is_checkpoint_format=True))
+            ray.get(self._ipc_engine.start_weight_update.remote(is_checkpoint_format=is_checkpoint_format))
         dist.barrier(group=get_gloo_group())
 
         megatron_local_weights = self.weights_getter()
@@ -296,12 +372,18 @@ class UpdateWeightFromTensor:
             # then release CUDA IPC cache entries whose consumers (vLLM engines)
             # have already closed their IPC handles.
             del long_lived_tensors, hf_named_tensors
-            torch.cuda.ipc_collect()
+            if is_npu():
+                torch.npu.synchronize()
+            else:
+                torch.cuda.ipc_collect()
 
         dist.barrier(group=get_gloo_group())
         # After the barrier all engines have returned, so every rank's last-chunk
         # IPC handles are now released by the consumers.  Clean them up.
-        torch.cuda.ipc_collect()
+        if is_npu():
+            torch.npu.synchronize()
+        else:
+            torch.cuda.ipc_collect()
 
         # vLLM #39212: exit weight-update mode.
         if self._ipc_engine is not None and rank == self._ipc_gather_src:
@@ -503,7 +585,10 @@ class vLLMColocateWorkerExtension:
     """vLLM ``--worker-extension-cls`` entry for colocated IPC weight sync."""
 
     def __new__(cls, **kwargs):
-        _VLLMHijack.hijack()
+        if is_npu():
+            _patch_npu_colocate_worker()
+        else:
+            _VLLMHijack.hijack()
         return super().__new__(cls)
 
     # ── Three-phase weight update protocol ────────────────────────────────────
@@ -547,8 +632,13 @@ class vLLMColocateWorkerExtension:
         shapes: list[list[int]] = inner["shapes"]
         ipc_handles: list[dict] = inner["ipc_handles"]
 
-        device_index = torch.cuda.current_device()
-        physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
+        if is_npu():
+            device_index = torch.npu.current_device()
+            props = torch.npu.get_device_properties(device_index)
+            physical_gpu_id = str(getattr(props, "uuid", f"npu:{device_index}"))
+        else:
+            device_index = torch.cuda.current_device()
+            physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
 
         # Reconstruct weights from per-tensor IPC handles (one handle per
         # parameter — the vLLM IPCWeightTransferEngine.trainer_send_weights
@@ -576,9 +666,11 @@ class vLLMColocateWorkerExtension:
             if self._is_checkpoint_format:
                 model.load_weights(weights=iter(weights))
             else:
-                for name, weight in weights:
-                    param = model.get_parameter(name)
-                    param.copy_(weight)
+                _load_colocate_weights_direct(
+                    model,
+                    weights,
+                    tp_rank=self.rank % self.parallel_config.tensor_parallel_size,
+                )
 
         # Ensure the receiver has finished consuming the IPC tensors before
         # the sender drops its reference on the next barrier.

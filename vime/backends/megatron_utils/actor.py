@@ -8,10 +8,25 @@ import numpy as np
 import ray
 import torch
 import torch.distributed as dist
+
 from vime.utils.common import is_npu
 
 if is_npu():
+    import importlib
+
+    importlib.import_module("vime.backends.megatron_utils.npu_attention_patch")
     from mindspeed.megatron_adaptor import repatch
+
+    _orig_npu_empty_cache = torch.npu.empty_cache
+
+    def _safe_empty_cache():
+        try:
+            _orig_npu_empty_cache()
+        except RuntimeError:
+            pass
+
+    torch.npu.empty_cache = _safe_empty_cache
+    torch.cuda.empty_cache = _safe_empty_cache
 from megatron.core import mpu
 from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
@@ -84,9 +99,17 @@ class MegatronTrainRayActor(TrainRayActor):
                 logger.info(f"Set torch_memory_saver.memory_margin_bytes to {x}")
                 torch_memory_saver.memory_margin_bytes = x
 
+        tms_region_ctx = None
+        if args.offload_train and is_npu():
+            tms_region_ctx = torch_memory_saver.region(tag="training", enable_cpu_backup=True)
+            tms_region_ctx.__enter__()
+
         self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
             args, role
         )
+
+        if tms_region_ctx is not None:
+            tms_region_ctx.__exit__(None, None, None)
 
         vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size() or 1
         if vpp_size > 1:
@@ -621,7 +644,7 @@ class MegatronTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+        with torch_memory_saver.disable() if (self.args.offload_train and not is_npu()) else nullcontext():
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")

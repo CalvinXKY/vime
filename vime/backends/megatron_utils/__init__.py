@@ -1,6 +1,12 @@
 import logging
 
 import torch
+
+try:
+    import torch_npu  # noqa: F401
+except ImportError:
+    pass
+
 from vime.utils.common import is_npu
 
 if is_npu():

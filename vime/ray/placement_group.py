@@ -18,10 +18,26 @@ logger = logging.getLogger(__name__)
 @ray.remote
 class InfoActor:
     def get_ip_and_gpu_id(self):
-        if is_npu():
-            return ray.util.get_node_ip_address(), ray.get_runtime_context().get_accelerator_ids()["NPU"][0]
-        else:
-            return ray.util.get_node_ip_address(), ray.get_gpu_ids()[0]
+        try:
+            import torch_npu  # noqa: F401
+
+            has_npu = True
+        except ImportError:
+            has_npu = False
+
+        if has_npu or is_npu():
+            npu_ids = ray.get_runtime_context().get_accelerator_ids().get("NPU", [])
+            if npu_ids:
+                return ray.util.get_node_ip_address(), npu_ids[0]
+
+        gpu_ids = ray.get_gpu_ids()
+        if gpu_ids:
+            return ray.util.get_node_ip_address(), gpu_ids[0]
+
+        raise RuntimeError(
+            "No GPU/NPU IDs found. "
+            f"Accelerator IDs: {ray.get_runtime_context().get_accelerator_ids()}, GPU IDs: {gpu_ids}"
+        )
 
 
 def sort_key(x):

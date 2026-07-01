@@ -15,12 +15,19 @@ def clear_memory(clear_host_memory: bool = False):
     else:
         torch.cuda.synchronize()
     gc.collect()
-    torch.cuda.empty_cache()
+    if not is_npu():
+        torch.cuda.empty_cache()
     if is_npu():
-        torch.npu.empty_cache()
+        try:
+            torch.npu.empty_cache()
+        except RuntimeError:
+            pass
     if clear_host_memory:
         if is_npu():
-            torch.npu.empty_cache()
+            try:
+                torch.npu.empty_cache()
+            except RuntimeError:
+                pass
         else:
             torch._C._host_emptyCache()
 
