@@ -39,22 +39,33 @@ export TASK_QUEUE_ENABLE=1
 export RAY_DISABLE_SIGINT_OVERRIDE=1
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/lib:/usr/local/Ascend/cann/lib64:${LD_LIBRARY_PATH}
+export VLLM_DISABLE_COMPILE_CACHE=1
+export ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-$ASCEND_RT_VISIBLE_DEVICES}"
+# Sort NPU devices
+if [ -n "$ASCEND_VISIBLE_DEVICES" ]; then
+    SORTED_DEVICES=$(echo "$ASCEND_VISIBLE_DEVICES" | tr ',' '\n' | sort -n | tr '\n' ',')
+    SORTED_DEVICES=${SORTED_DEVICES%,}
+    export ASCEND_VISIBLE_DEVICES="$SORTED_DEVICES"
+    echo "Sorted ASCEND_VISIBLE_DEVICES: $ASCEND_VISIBLE_DEVICES"
+fi
 
 SCRIPT_DIR="/root/vime/scripts/"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
+LOG_FILE="/root/vime/train_qwen3_4b_vllm.log"
+MODEL_ROOT="${MODEL_ROOT:-/root}"
 
 CKPT_ARGS=(
-   --hf-checkpoint /root/Qwen3-4B
-   --ref-load /root/Qwen3-4B
-   --load /root/Qwen3-4B/
-   --save /root/Qwen3-4B/
+   --hf-checkpoint ${MODEL_ROOT}/models/Qwen3-4B
+   --ref-load ${MODEL_ROOT}/models/Qwen3-4B
+   --load ${MODEL_ROOT}/models/Qwen3-4B/
+   --save ${MODEL_ROOT}/models/Qwen3-4B/
    --save-interval 20
    --no-load-optim
    --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/data/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data ${MODEL_ROOT}/datasets/dapo-math-17k/dapo-math-17k.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -126,7 +137,8 @@ MISC_ARGS=(
 
 # Start Ray with isolated temp-dir and ports
 unset ASCEND_RT_VISIBLE_DEVICES https_proxy http_proxy proxy
-ray start --head     --temp-dir="${RAY_TMPDIR}"     --port="${RAY_PORT}"     --dashboard-port="${RAY_DASHBOARD_PORT}"     --dashboard-agent-listen-port="${RAY_AGENT_PORT}" --node-ip-address 127.0.0.1     --num-gpus 0     --resources '{"NPU": 8}'     --disable-usage-stats     --dashboard-host=0.0.0.0
+NPU_COUNT=$(echo "$ASCEND_VISIBLE_DEVICES" | tr ',' '\n' | wc -l)
+ray start --head     --temp-dir="${RAY_TMPDIR}"     --port="${RAY_PORT}"     --dashboard-port="${RAY_DASHBOARD_PORT}"     --dashboard-agent-listen-port="${RAY_AGENT_PORT}" --node-ip-address 127.0.0.1     --num-gpus 0     --resources '{"NPU": '"$NPU_COUNT"'}'     --disable-usage-stats     --dashboard-host=0.0.0.0
 
 RUNTIME_ENV_JSON=$(cat << 'EOF'
 {
@@ -138,7 +150,8 @@ RUNTIME_ENV_JSON=$(cat << 'EOF'
     "HCCL_CONNECT_TIMEOUT": "7200",
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:False",
     "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-    "LD_LIBRARY_PATH": "/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/ascend-toolkit/latest/compiler/lib64/plugin/opskernel:/usr/local/Ascend/ascend-toolkit/latest/compiler/lib64/plugin/nnengine:/usr/local/Ascend/ascend-toolkit/latest/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/:/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/lib:/usr/local/Ascend/cann/lib64:/usr/local/Ascend/cann/aarch64-linux/devlib"
+    "LD_LIBRARY_PATH": "/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/ascend-toolkit/latest/compiler/lib64/plugin/opskernel:/usr/local/Ascend/ascend-toolkit/latest/compiler/lib64/plugin/nnengine:/usr/local/Ascend/ascend-toolkit/latest/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/:/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/lib:/usr/local/Ascend/cann/lib64:/usr/local/Ascend/cann/aarch64-linux/devlib",
+    "VLLM_DISABLE_COMPILE_CACHE": "1"
   }
 }
 EOF
@@ -159,4 +172,5 @@ ${OPTIMIZER_ARGS[@]} \
 ${GRPO_ARGS[@]} \
 ${PERF_ARGS[@]} \
 ${VLLM_ARGS[@]} \
-${MISC_ARGS[@]}
+${MISC_ARGS[@]} \
+2>&1 | tee -a "$LOG_FILE"
