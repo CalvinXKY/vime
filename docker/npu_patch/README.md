@@ -7,8 +7,8 @@ This guide provides instructions for installing Vime with NPU support, including
 | Component       | Version/Commit                           | Source                                                                                                              |
 | --------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | vime            | ascend                                   | [GitHub](https://github.com/vllm-project/vime/tree/ascend)                                                            |
-| vLLM            | see `.github/vllm-main-verified.commit` at pinned vLLM Ascend | [GitHub](https://github.com/vllm-project/vllm)                                                                      |
-| vLLM Ascend     | 5ca762a704f2a7acbd1bd839c3f3b421e5c0dcaf | [GitHub](https://github.com/vllm-project/vllm-ascend)                                                               |
+| vLLM            | `0.22.1rc1` (see `.github/vllm-main-verified.commit` at pinned vLLM Ascend) | [GitHub](https://github.com/vllm-project/vllm) — e.g. `967c5c3bc38891f4465d3f4e99917ed837bb3833` at pin above |
+| vLLM Ascend     | `0.1.dev1+g5ca762a704f2` (dev snapshot; pin commit below) | [GitHub](https://github.com/vllm-project/vllm-ascend) — commit `5ca762a704f2a7acbd1bd839c3f3b421e5c0dcaf` (#10996) |
 | Megatron-Bridge | 3fd3768045422d0aa5c97e90a4e6c659aea9acb9 | [GitHub](https://github.com/radixark/Megatron-Bridge)                                                               |
 | Megatron-LM     | 3714d81d418c9f1bca4594fc35f9e8289f652862 | [GitHub](https://github.com/NVIDIA/Megatron-LM)                                                                     |
 | MindSpeed       | fc63de5c48426dd019c3b3f39e65f5bdf56e4086 | [GitCode](https://gitcode.com/Ascend/MindSpeed)                                                                     |
