@@ -8,8 +8,8 @@ issue on [vllm-project/vime](https://github.com/vllm-project/vime/issues).
 If you are running vime on Ascend NPU, please refer to the following materials.
 This tutorial explains how to set up the runtime environment and provides an
 end-to-end example for running GRPO training. It uses the **Megatron** training
-backend together with the **vLLM Ascend** rollout backend, synchronizing actor 
-weights to vLLM through the native HCCL weight-sync path.
+backend together with the **vLLM Ascend** rollout backend. In decoupled mode,
+weights sync over HCCL; in colocate mode (`--colocate`), weights sync over NPU IPC.
 
 The current NPU support targets Ascend **Atlas A2 / A3** (aarch64) hosts with the
 Ascend driver and **CANN 9.0.0** (Toolkit, Kernels, and NNAL/ATB) installed.
@@ -27,7 +27,7 @@ docker pull "${IMAGE}"
 ```
 
 For source builds and dependency debugging, the patch list and pinned commits are
-documented in [`docker/npu_patch/README.md`](https://github.com/vllm-project/vime/blob/npu/docker/npu_patch/README.md).
+documented in [`docker/npu_patch/README.md`](https://github.com/vllm-project/vime/blob/ascend/docker/npu_patch/README.md).
 
 ## Quick Start
 
@@ -202,3 +202,36 @@ python /root/vime/train.py \
   --train-memory-margin-bytes 2147483648 \
   2>&1 | tee -a "$LOG_FILE"
 ```
+
+### Example: Qwen3-4B Colocate
+
+Colocate runs training and rollout on the same NPUs (8×910B validated). Add
+`--colocate` and set `--tensor-model-parallel-size` to match the NPU count.
+Use `--megatron-to-hf-mode bridge` for weight export.
+
+```bash
+python /root/vime/train.py \
+  --train-backend megatron \
+  --actor-num-nodes 1 \
+  --actor-num-gpus-per-node 8 \
+  --rollout-num-gpus 8 \
+  --rollout-num-gpus-per-engine 8 \
+  --colocate \
+  --train-memory-margin-bytes 2147483648 \
+  --megatron-to-hf-mode bridge \
+  --tensor-model-parallel-size 8 \
+  ...  # same GRPO / optimizer flags as the decoupled example
+```
+
+Colocate notes (validated on 8× Ascend910B1, Qwen3-4B TP=8):
+
+- Do **not** pass `--vllm-enforce-eager`; it raises `train_rollout_logprob_abs_diff`
+  to ~0.2 (normal colocate diff is ~0.012).
+- Kill leftover `VLLMWorker` / `train.py` processes and release HBM before each
+  run (`npu-smi info` should show ~3 GB per card idle).
+- vLLM Ascend must be at least `5ca762a` (#10996) for the native NPU IPC weight
+  transfer engine; only the colocate `worker.py` patch in `vllm-ascend.patch`
+  is still required from Vime.
+
+Validated results: smoke (4 rollouts) diff ~0.012; 100-step long run diff
+0.00785–0.01257 with stable convergence.

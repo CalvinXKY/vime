@@ -6,7 +6,9 @@ This guide provides instructions for installing Vime with NPU support, including
 
 | Component       | Version/Commit                           | Source                                                                                                              |
 | --------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| vime            | main                                     | [GitHub](https://github.com/vllm-project/vime/tree/main)                                                            |
+| vime            | ascend                                   | [GitHub](https://github.com/vllm-project/vime/tree/ascend)                                                            |
+| vLLM            | see `.github/vllm-main-verified.commit` at pinned vLLM Ascend | [GitHub](https://github.com/vllm-project/vllm)                                                                      |
+| vLLM Ascend     | 5ca762a704f2a7acbd1bd839c3f3b421e5c0dcaf | [GitHub](https://github.com/vllm-project/vllm-ascend)                                                               |
 | Megatron-Bridge | 3fd3768045422d0aa5c97e90a4e6c659aea9acb9 | [GitHub](https://github.com/radixark/Megatron-Bridge)                                                               |
 | Megatron-LM     | 3714d81d418c9f1bca4594fc35f9e8289f652862 | [GitHub](https://github.com/NVIDIA/Megatron-LM)                                                                     |
 | MindSpeed       | fc63de5c48426dd019c3b3f39e65f5bdf56e4086 | [GitCode](https://gitcode.com/Ascend/MindSpeed)                                                                     |
@@ -100,22 +102,33 @@ pip install --no-deps output/torch_memory_saver-0.0.8-cp312-cp312-linux_aarch64.
 
 
 ```bash
-export VLLM_COMMIT=9090368b650896bf5fc990c921df7eb4c20355a5
+export VLLM_ASCEND_COMMIT=5ca762a704f2a7acbd1bd839c3f3b421e5c0dcaf
+
+git clone https://github.com/vllm-project/vllm-ascend.git "${WORKSPACE}/vllm-ascend"
+git -C "${WORKSPACE}/vllm-ascend" checkout "${VLLM_ASCEND_COMMIT}"
+git -C "${WORKSPACE}/vllm-ascend" submodule update --init --recursive
+export VLLM_COMMIT="$(cat "${WORKSPACE}/vllm-ascend/.github/vllm-main-verified.commit")"
 
 git clone https://github.com/vllm-project/vllm.git "${WORKSPACE}/vllm"
 git -C "${WORKSPACE}/vllm" checkout "${VLLM_COMMIT}"
+git -C "${WORKSPACE}/vllm" apply --whitespace=nowarn "${PATCH_DIR}/vllm.patch"
 VLLM_TARGET_DEVICE=empty pip install -v -e "${WORKSPACE}/vllm"
 
-git clone https://github.com/vllm-project/vllm-ascend.git "${WORKSPACE}/vllm-ascend"
-git -C "${WORKSPACE}/vllm-ascend" submodule update --init --recursive
+git -C "${WORKSPACE}/vllm-ascend" apply --whitespace=nowarn "${PATCH_DIR}/vllm-ascend.patch"
 pip install -v -e "${WORKSPACE}/vllm-ascend"
 ```
 
 > [!NOTE]
 > vLLM Ascend has not yet cut a release tag against vLLM 0.22.0. As a temporary
-> measure we pin vLLM to the commit below and build vLLM Ascend from source.
+> measure we pin vLLM and vLLM Ascend to the commits above and build from source.
 > Once vLLM Ascend officially supports 0.22.0, this whole step can be omitted and
 > the released packages used instead.
+
+> [!NOTE]
+> `vllm-ascend.patch` only patches `worker.py` for colocate (skip free-memory
+> checks when training and inference share NPUs). The `NPUIPCWeightTransferEngine`
+> init fix is upstream since vLLM Ascend `5ca762a` (#10996); do not re-patch
+> `npu_ipc_engine.py`.
 
 ## Additional Dependencies
 

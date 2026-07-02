@@ -7,6 +7,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /root
 
 ARG MEGATRON_COMMIT=3714d81d418c9f1bca4594fc35f9e8289f652862
+ARG VLLM_ASCEND_COMMIT=5ca762a704f2a7acbd1bd839c3f3b421e5c0dcaf
 ARG MEGATRON_BRIDGE_COMMIT=3fd3768045422d0aa5c97e90a4e6c659aea9acb9
 ARG MINDSPEED_COMMIT=fc63de5c48426dd019c3b3f39e65f5bdf56e4086
 ARG MBRIDGE_COMMIT=89eb10887887bc74853f89a4de258c0702932a1c
@@ -44,12 +45,12 @@ RUN sed -i '/ports\.ubuntu\.com/ {h;s|ports\.ubuntu\.com|mirrors.tuna.tsinghua.e
       "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
     git config --global http.version HTTP/1.1
 
-# Clone vllm and vllm-ascend sources.
+# Clone vllm and vllm-ascend sources (pin ascend for native NPU IPC engine).
 RUN pip uninstall -y \
       vllm vllm-ascend megatron-bridge megatron-core mindspeed mbridge vime || true && \
     git clone https://github.com/vllm-project/vllm.git /root/vllm && \
-    git clone --depth 1 --branch main \
-      https://github.com/vllm-project/vllm-ascend.git /root/vllm-ascend
+    git clone https://github.com/vllm-project/vllm-ascend.git /root/vllm-ascend && \
+    git -C /root/vllm-ascend checkout "${VLLM_ASCEND_COMMIT}"
 
 # Switch vllm to the vllm-ascend verified commit, apply the NPU patch, install.
 RUN VLLM_COMMIT=$(cat /root/vllm-ascend/.github/vllm-main-verified.commit) && \
@@ -58,7 +59,7 @@ RUN VLLM_COMMIT=$(cat /root/vllm-ascend/.github/vllm-main-verified.commit) && \
       VLLM_TARGET_DEVICE=empty pip install -v -e /root/vllm --trusted-host download.pytorch.org \
       --trusted-host download-r2.pytorch.org
 
-# vLLM Ascend: apply colocate patch before install.
+# vLLM Ascend: apply colocate worker patch only (IPC engine fix is upstream).
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     git -C /root/vllm-ascend submodule update --init --recursive && \
