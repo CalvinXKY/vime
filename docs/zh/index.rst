@@ -66,3 +66,9 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
    developer_guide/debug.md
    developer_guide/trace.md
    developer_guide/profiling.md
+
+.. toctree::
+   :maxdepth: 1
+   :caption: 硬件平台
+
+   platform_support/ascend_tutorial.md

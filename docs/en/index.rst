@@ -66,3 +66,10 @@ vime is built on `slime <https://github.com/THUDM/slime>`_, the RL framework beh
    developer_guide/debug.md
    developer_guide/trace.md
    developer_guide/profiling.md
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Hardware Platforms
+
+   platform_support/amd_tutorial.md
+   platform_support/ascend_tutorial.md
