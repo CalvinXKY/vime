@@ -21,10 +21,12 @@ the teacher's log-probabilities.
 
 | File | Description |
 |------|-------------|
-| `run-qwen3-4b-32b-opd.sh` | 8×GPU colocate demo: Qwen3-4B student + external Qwen3-32B vLLM teacher on GSM8K |
-| `run-qwen3-8b-opd-megatron.sh` | Megatron-loaded teacher (no external server); student rollout still uses vLLM |
+| `run-qwen3-4b-32b-opd.sh` | **Recommended.** 8×GPU colocate: Qwen3-4B student + external Qwen3-32B vLLM teacher (GSM8K validated) |
+| `run-qwen3-8b-opd-megatron.sh` | Megatron-loaded teacher (self-distillation demo); includes OOM mitigations for 8×80GB |
 
-## GPU Layout (`run-qwen3-4b-32b-opd.sh`)
+## GPU Layout
+
+### `run-qwen3-4b-32b-opd.sh` (vLLM teacher)
 
 Single node, 8× GPU:
 
@@ -32,6 +34,17 @@ Single node, 8× GPU:
 |------|------|
 | 0–3 | Student Megatron train (TP=2) + student vLLM rollout (TP=2), colocate |
 | 4–7 | Teacher vLLM (Qwen3-32B, TP=4) |
+
+### `run-qwen3-8b-opd-megatron.sh` (Megatron teacher)
+
+| GPUs | Role |
+|------|------|
+| 0–3 | Student + teacher Megatron (TP=4), colocate with student vLLM rollout |
+| 4–7 | Student vLLM rollout engines |
+
+Teacher and student share the same architecture (demo uses Qwen3-8B
+self-distillation). Prefer `--opd-type vllm` when the teacher is larger or does
+not fit together with the student in training GPU memory.
 
 ## Key Arguments
 
@@ -118,7 +131,7 @@ For same-architecture teacher/student pairs that fit in GPU memory together,
 use the Megatron teacher path — no external vLLM teacher server needed:
 
 ```bash
-# Convert teacher (example uses Qwen3-8B; use a stronger checkpoint in practice)
+# Convert student/teacher (demo uses Qwen3-8B self-distillation)
 cd /root/vime
 source scripts/models/qwen3-8B.sh
 PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
@@ -126,11 +139,16 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
   --hf-checkpoint /root/models/Qwen3-8B \
   --save /root/models/Qwen3-8B_torch_dist
 
+# Also prepare rollout data + GSM8K eval set:
+#   /root/datasets/dapo-math-17k/dapo-math-17k.jsonl
+#   /root/datasets/gsm8k/test.parquet
+
 bash examples/on_policy_distillation/run-qwen3-8b-opd-megatron.sh
 ```
 
 Edit `--opd-teacher-load` in the Megatron script to point at your teacher
-checkpoint.
+checkpoint. On 8×A800 80GB, keep the memory defaults (TP=4, full recompute,
+`max-tokens-per-gpu=8192`); see FAQ.
 
 ## Preliminary Results
 
@@ -168,6 +186,22 @@ Training health signal: `rollout/opd_reverse_kl` dropped from 0.216 → 0.110
    Re-convert with `--padded-vocab-size 152064` and TP=1 (do not set
    `--tensor-model-parallel-size 2` during conversion). Add
    `--make-vocab-size-divisible-by 128` at training time.
+
+5. **Megatron teacher OOM on Qwen3-8B + Qwen3-8B?**
+   Student weights, optimizer state, and teacher weights share the 4 training
+   GPUs. The example script already applies the known mitigations:
+   - `--tensor-model-parallel-size 4`
+   - `--recompute-num-layers 36` (full activation recompute)
+   - `--max-tokens-per-gpu 8192`
+   - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+   - `--save-interval 10` so checkpoints land before a long-run OOM
+   If memory is still tight, reduce `--num-rollout` / `--rollout-max-response-len`,
+   or switch to `--opd-type vllm` with an external teacher server.
+
+6. **Self-distillation: why is `opd_reverse_kl` near 0 at the start?**
+   Teacher and student start from the same weights, so reverse KL is ~0 until
+   the student updates. For a true distillation signal, use a stronger /
+   differently trained teacher checkpoint.
 
 ## References
 

@@ -6,10 +6,16 @@
 # Student rollout still uses vLLM. This demo uses the same architecture for
 # student and teacher — replace --opd-teacher-load with a stronger checkpoint
 # in practice.
+#
+# Memory note (8×A800 80GB): loading student + teacher (both Qwen3-8B) on
+# 4 training GPUs is tight. The defaults below match a validated config:
+# TP=4, full activation recompute, max-tokens-per-gpu=8192, and
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True. See README FAQ.
 
 set -ex
 
 export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 if [ "$NVLINK_COUNT" -gt 0 ]; then
@@ -19,11 +25,9 @@ else
 fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
-pkill -9 vllm 2>/dev/null || true
-sleep 3
 ray stop --force 2>/dev/null || true
 pkill -9 ray 2>/dev/null || true
-pkill -9 python 2>/dev/null || true
+pkill -9 -f "train.py" 2>/dev/null || true
 sleep 3
 
 source "/root/vime/scripts/models/qwen3-8B.sh"
@@ -33,7 +37,7 @@ CKPT_ARGS=(
     --ref-load /root/models/Qwen3-8B_torch_dist
     --load /root/models/Qwen3-8B_torch_dist
     --save /root/Qwen3-8B_opd/
-    --save-interval 20
+    --save-interval 10
     --megatron-to-hf-mode bridge
 )
 
@@ -53,15 +57,17 @@ ROLLOUT_ARGS=(
 )
 
 EVAL_ARGS=(
-    # --eval-interval 20
-    # --eval-prompt-data aime /root/datasets/aime-2024/aime-2024.jsonl
-    # --n-samples-per-eval-prompt 16
-    # --eval-max-response-len 16384
-    # --eval-top-p 1
+    --eval-interval 50
+    --eval-prompt-data gsm8k /root/datasets/gsm8k/test.parquet
+    --n-samples-per-eval-prompt 1
+    --eval-max-response-len 4096
+    --eval-top-k 1
 )
 
 PERF_ARGS=(
-    --tensor-model-parallel-size 2
+    # TP=4 + full recompute + lower token budget: needed so student+teacher
+    # (both Qwen3-8B) fit on 4×80GB training GPUs.
+    --tensor-model-parallel-size 4
     --sequence-parallel
     --pipeline-model-parallel-size 1
     --context-parallel-size 1
@@ -69,9 +75,9 @@ PERF_ARGS=(
     --expert-tensor-parallel-size 1
     --recompute-granularity full
     --recompute-method uniform
-    --recompute-num-layers 1
+    --recompute-num-layers 36
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 16384
+    --max-tokens-per-gpu 8192
 )
 
 GRPO_ARGS=(
@@ -113,6 +119,7 @@ MISC_ARGS=(
     --accumulate-allreduce-grads-in-fp32
     --attention-softmax-in-fp32
     --attention-backend flash
+    --make-vocab-size-divisible-by 128
 )
 
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
@@ -123,7 +130,8 @@ RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/vime:/root/Megatron-LM/\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-    \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\"
+    \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
+    \"PYTORCH_CUDA_ALLOC_CONF\": \"expandable_segments:True\"
   }
 }"
 
@@ -146,8 +154,6 @@ ray job submit --address="http://127.0.0.1:8265" \
     ${VLLM_ARGS[@]} \
     ${MISC_ARGS[@]}
 
-pkill -9 vllm 2>/dev/null || true
-sleep 3
 ray stop --force 2>/dev/null || true
 pkill -9 ray 2>/dev/null || true
-pkill -9 python 2>/dev/null || true
+pkill -9 -f "train.py" 2>/dev/null || true
