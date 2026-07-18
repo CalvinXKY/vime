@@ -1,209 +1,180 @@
 # On-Policy Distillation Example
 
-This example shows how to run **on-policy distillation (OPD)** with vime. A small
-student (Qwen3-4B) learns to match a larger teacher (Qwen3-32B) by training only
-on the student's own vLLM rollouts and applying a token-level KL penalty against
-the teacher's log-probabilities.
+This example shows how to run **on-policy distillation (OPD)** using vime. A
+small student (Qwen3-8B) is aligned to imitate a larger teacher (Qwen3-32B) by
+training only on the student's own rollouts and matching the teacher's
+token-level log-probabilities.
 
 ## Key Features
 
-- **OPD is orthogonal to advantage estimators**: OPD adds a KL penalty on top of
-  any advantage estimator (GRPO, PPO, REINFORCE++, etc.), not as a separate
-  estimator.
+- **OPD is orthogonal to advantage estimators**: OPD works as an additive KL
+  penalty on top of any advantage estimator (GRPO, PPO, REINFORCE++, etc.), not
+  as a separate estimator.
 - **Two teacher modes**:
-  - **`vllm`**: Teacher runs on an external vLLM server; teacher log-probs are
-    fetched during rollout via `--rm-url`.
-  - **`megatron`**: Teacher is loaded into Megatron via `--opd-teacher-load`;
-    teacher log-probs are computed during the training forward pass.
+  - **vllm**: Teacher runs on an external vLLM server; teacher log-probs are
+    obtained during rollout.
+  - **megatron**: Teacher is loaded directly into Megatron via
+    `--opd-teacher-load`; teacher log-probs are computed during the training
+    forward pass.
 - **Student rollout always uses vLLM** (vime's default rollout backend).
-
-## Files
-
-| File | Description |
-|------|-------------|
-| `run-qwen3-4b-32b-opd.sh` | **Recommended.** 8×GPU colocate: Qwen3-4B student + external Qwen3-32B vLLM teacher (GSM8K validated) |
-| `run-qwen3-8b-opd-megatron.sh` | Megatron-loaded teacher (self-distillation demo); includes OOM mitigations for 8×80GB |
-
-## GPU Layout
-
-### `run-qwen3-4b-32b-opd.sh` (vLLM teacher)
-
-Single node, 8× GPU:
-
-| GPUs | Role |
-|------|------|
-| 0–3 | Student Megatron train (TP=2) + student vLLM rollout (TP=2), colocate |
-| 4–7 | Teacher vLLM (Qwen3-32B, TP=4) |
-
-### `run-qwen3-8b-opd-megatron.sh` (Megatron teacher)
-
-| GPUs | Role |
-|------|------|
-| 0–3 | Student + teacher Megatron (TP=4), colocate with student vLLM rollout |
-| 4–7 | Student vLLM rollout engines |
-
-Teacher and student share the same architecture (demo uses Qwen3-8B
-self-distillation). Prefer `--opd-type vllm` when the teacher is larger or does
-not fit together with the student in training GPU memory.
 
 ## Key Arguments
 
 | Argument | Description |
 |----------|-------------|
-| `--use-opd` | Enable on-policy distillation. |
-| `--opd-type` | `vllm` or `megatron`. Required when `--use-opd` is set. |
+| `--use-opd` | Enable on-policy distillation. Required flag to use OPD. |
+| `--opd-type` | Type of OPD: `vllm` or `megatron`. Required when `--use-opd` is set. |
 | `--opd-kl-coef` | OPD KL penalty coefficient (default: 1.0). |
-| `--opd-teacher-load` | Teacher checkpoint path. **Required** for `--opd-type=megatron`; must **not** be set for `--opd-type=vllm`. |
-| `--rm-url` | Teacher vLLM generate endpoint. Required for `--opd-type=vllm`. |
-| `--custom-rm-path` | `vime.rollout.on_policy_distillation.reward_func` |
-| `--custom-reward-post-process-path` | `vime.rollout.on_policy_distillation.post_process_rewards` |
+| `--opd-teacher-load` | Path to teacher checkpoint. **Required** when `--opd-type=megatron`, **must not be set** when `--opd-type=vllm`. |
+| `--opd-teacher-ckpt-step` | Optional checkpoint step for teacher model. |
+
+## Mode Comparison
+
+| Mode | Teacher Location | When to use |
+|------|------------------|-------------|
+| `vllm` | External vLLM server | Teacher has different architecture or is larger than GPU memory |
+| `megatron` | Loaded into Megatron training | Teacher has same architecture as policy/ref model |
 
 ## Components
 
-- `vime/rollout/on_policy_distillation.py` implements the vLLM teacher path:
-  - `reward_func` POSTs each rollout sample to the teacher vLLM server
-    (`--rm-url`) and collects token-level log-probs.
-  - `post_process_rewards` trims teacher log-probs to the response span and
-    stores them on each `Sample` for the OPD KL term in training.
-- Megatron teacher mode computes teacher log-probs inside
-  `apply_opd_kl_to_advantages` during the training forward pass.
+- `vime/rollout/on_policy_distillation.py` implements (for vLLM mode):
+  - `reward_func` calls the teacher server (via `args.rm_url`) with every sample
+    to obtain token-level logprobs.
+  - `post_process_rewards` trims the teacher logprobs to the generated response
+    span and writes the tensors back to each `Sample` to compute advantages.
+- `run-qwen3-8B-opd.sh` launches a vLLM teacher server, then submits a Ray job
+  that runs `train.py`.
+- `run-qwen3-8B-opd-megatron.sh` uses a Megatron-loaded teacher model (no
+  external server needed).
 
-## OPD Data Flow
+## Running the example
 
-```
-Student vLLM rollout (GPU 0-3)
-  → token sequence + student logprobs
-Teacher vLLM (HTTP POST, GPU 4-7)          [vllm mode only]
-  → teacher_log_probs per token
-post_process_rewards
-  → store teacher_log_probs; scalar_rewards=[0.0] (pure distillation)
-apply_opd_kl_to_advantages (Megatron)
-  → advantages -= opd_kl_coef * (student_logp - teacher_logp)
-GRPO policy update
-```
+### Using vLLM Teacher (External Server)
 
-## Running the Example
-
-### Prerequisites
+1. Download or prepare the required checkpoints and data.
 
 ```bash
-# Models
-hf download Qwen/Qwen3-32B --local-dir /root/models/Qwen3-32B
-hf download Qwen/Qwen3-4B   --local-dir /root/models/Qwen3-4B
-
-# Data
-hf download --repo-type dataset openai/gsm8k --local-dir /root/datasets/gsm8k
-# Or use a parquet copy with `messages` + `label` columns under /root/datasets/gsm8k/
+hf download Qwen/Qwen3-32B --local-dir /root/Qwen3-32B
+hf download Qwen/Qwen3-8B --local-dir /root/Qwen3-8B
+hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/dapo-math-17k
 ```
 
-### Step 1: Convert student checkpoint
-
-Qwen3-4B uses tied embeddings (`tie_word_embeddings=True`) — **do not** pass
-`--untie-embeddings-and-output-weights`. Use TP=1 for conversion; training uses
-TP=2 at runtime. Pad vocab to 152064 for TP=2 training:
+2. Run the hf to mcore for student model conversion:
 
 ```bash
-cd /root/vime
-source scripts/models/qwen3-4B.sh
-
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-  --hf-checkpoint /root/models/Qwen3-4B \
-  --save /root/models/Qwen3-4B_torch_dist \
-  --padded-vocab-size 152064
-```
-
-### Step 2: Run OPD (vLLM teacher)
-
-```bash
-cd /root/vime
-bash examples/on_policy_distillation/run-qwen3-4b-32b-opd.sh
-```
-
-The script will:
-
-1. Launch the Qwen3-32B teacher vLLM server on GPUs 4–7.
-2. Start Ray on GPUs 0–3 and submit the OPD training job.
-3. Tear down the teacher server and Ray when training finishes.
-
-### Step 3 (optional): Megatron teacher
-
-For same-architecture teacher/student pairs that fit in GPU memory together,
-use the Megatron teacher path — no external vLLM teacher server needed:
-
-```bash
-# Convert student/teacher (demo uses Qwen3-8B self-distillation)
 cd /root/vime
 source scripts/models/qwen3-8B.sh
+
 PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-  ${MODEL_ARGS[@]} \
-  --hf-checkpoint /root/models/Qwen3-8B \
-  --save /root/models/Qwen3-8B_torch_dist
-
-# Also prepare rollout data + GSM8K eval set:
-#   /root/datasets/dapo-math-17k/dapo-math-17k.jsonl
-#   /root/datasets/gsm8k/test.parquet
-
-bash examples/on_policy_distillation/run-qwen3-8b-opd-megatron.sh
+    ${MODEL_ARGS[@]} \
+    --hf-checkpoint /root/Qwen3-8B \
+    --save /root/Qwen3-8B_torch_dist
 ```
 
-Edit `--opd-teacher-load` in the Megatron script to point at your teacher
-checkpoint. On 8×A800 80GB, keep the memory defaults (TP=4, full recompute,
-`max-tokens-per-gpu=8192`); see FAQ.
+3. Run on-policy distillation:
 
-## Preliminary Results
+```bash
+bash examples/on_policy_distillation/run-qwen3-8B-opd.sh
+```
 
-End-to-end run with `run-qwen3-4b-32b-opd.sh` (500 rollout steps, GRPO +
-`--opd-kl-coef 1.0`, GSM8K greedy eval, n=1319):
+GPU layout (8×GPU):
+
+| GPUs | Role |
+|------|------|
+| 0–3 | Student Megatron train + student vLLM rollout (colocate) |
+| 4–7 | Teacher vLLM (Qwen3-32B, TP=4) |
+
+### Using Megatron Teacher (No External Server)
+
+1. Prepare student checkpoint (same as above).
+
+2. **IMPORTANT**: Convert your teacher model to Megatron format (change the path
+   to your actual teacher):
+
+```bash
+# This example uses the same model as both student and teacher (for demonstration only)
+# In practice, use a different (stronger) model as the teacher!
+cd /root/vime
+source scripts/models/qwen3-8B.sh  # Or your teacher model config
+
+PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
+    ${MODEL_ARGS[@]} \
+    --hf-checkpoint /root/YourTeacherModel \
+    --save /root/YourTeacherModel_torch_dist
+```
+
+3. Edit `run-qwen3-8B-opd-megatron.sh` to update paths:
+   - Change `--opd-teacher-load` to your teacher model path
+   - Adjust `--opd-kl-coef` based on your task
+
+4. Run:
+
+```bash
+bash examples/on_policy_distillation/run-qwen3-8B-opd-megatron.sh
+```
+
+# Preliminary Results
+
+End-to-end run with `run-qwen3-8B-opd.sh` on 8×A800 80GB (dapo-math-17k train,
+GRPO + `--opd-kl-coef 1.0`, ~220 rollouts / iter_0000219). Offline GSM8K greedy
+eval:
 
 | Model | GSM8K Accuracy |
 |-------|----------------|
-| Qwen3-4B (pre-OPD) | 78.8% |
-| Qwen3-4B (post-OPD, 500 steps) | **85.6%** (+6.8 pp) |
-| Qwen3-32B teacher | 88.6% |
+| Qwen3-8B (pre-OPD) | 79.7% (n=300) |
+| Qwen3-8B (post-OPD) | **88.2%** (n=1319, **+8.5 pp**) |
+| Qwen3-32B teacher | 87.0% (n=300) |
 
-Training health signal: `rollout/opd_reverse_kl` dropped from 0.216 → 0.110
-(−49%) over 500 steps.
+Training health signal: `rollout/opd_reverse_kl` dropped from 0.145 → ~0.10
+(−38%). Pure OPD uses `raw_reward=0`; the learning signal is the OPD KL term.
 
-## FAQ
+Notes from the validated run:
 
-1. **Why two OPD modes?**
-   - `vllm`: Teacher on a separate vLLM server. Use when the teacher is larger
-     or has a different architecture than the student.
-   - `megatron`: Teacher loaded into Megatron. Use when teacher and student share
-     architecture and fit in training GPU memory.
+- Colocate memory is tight for 8B+32B; keep `--rollout-max-response-len 4096`,
+  `--rollout-max-context-len 8192`, `--max-tokens-per-gpu 2048`, and
+  `--vllm-gpu-memory-utilization 0.25` unless you have more headroom.
+- Teacher vLLM needs `--max-model-len 16384` and `--disable-custom-all-reduce`
+  for TP=4 stability.
+- Prefer offline eval after training; in-training eval is currently incompatible
+  with OPD's custom reward payload.
+- Megatron checkpoints are large (~100GB each); plan disk or lower
+  `--save-interval`.
 
-2. **Why is `rollout/raw_reward` always 0?**
+# FAQ
+
+1. **Why are there two OPD modes?**
+   - `vllm` mode: The teacher runs on an independent vLLM server. This is useful
+     when the teacher has a different architecture or is too large to load
+     together with the policy model.
+   - `megatron` mode: The teacher is loaded into Megatron using the same
+     parameter loading mechanism as the reference model. This requires the
+     teacher to have the same architecture as the policy model.
+
+2. **How do I use Megatron-based teacher instead of vLLM server?**
+   Replace your OPD arguments:
+   ```bash
+   # Instead of:
+   --use-opd --opd-type vllm --opd-kl-coef 1.0
+   # Use:
+   --use-opd --opd-type megatron --opd-kl-coef 1.0 --opd-teacher-load /path/to/teacher_checkpoint
+   ```
+
+3. **What happens if I set wrong arguments?**
+   The system will raise clear errors:
+   - `--use-opd` without `--opd-type`: Error asking you to specify type
+   - `--opd-type megatron` without `--opd-teacher-load`: Error asking for teacher checkpoint
+   - `--opd-type vllm` with `--opd-teacher-load`: Error indicating conflict
+
+4. **Why is `rollout/raw_reward` always 0?**
    Pure OPD distillation does not use an external reward model. The learning
    signal comes entirely from the OPD KL term applied to advantages.
 
-3. **What if I set incompatible arguments?**
-   vime validates OPD args at startup:
-   - `--use-opd` without `--opd-type` → error
-   - `--opd-type megatron` without `--opd-teacher-load` → error
-   - `--opd-type vllm` with `--opd-teacher-load` → error
-
-4. **Qwen3-4B checkpoint conversion fails with vocab/TP errors?**
-   Re-convert with `--padded-vocab-size 152064` and TP=1 (do not set
-   `--tensor-model-parallel-size 2` during conversion). Add
-   `--make-vocab-size-divisible-by 128` at training time.
-
-5. **Megatron teacher OOM on Qwen3-8B + Qwen3-8B?**
-   Student weights, optimizer state, and teacher weights share the 4 training
-   GPUs. The example script already applies the known mitigations:
-   - `--tensor-model-parallel-size 4`
-   - `--recompute-num-layers 36` (full activation recompute)
-   - `--max-tokens-per-gpu 8192`
-   - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
-   - `--save-interval 10` so checkpoints land before a long-run OOM
-   If memory is still tight, reduce `--num-rollout` / `--rollout-max-response-len`,
-   or switch to `--opd-type vllm` with an external teacher server.
-
-6. **Self-distillation: why is `opd_reverse_kl` near 0 at the start?**
+5. **Self-distillation: why is `opd_reverse_kl` near 0 at the start?**
    Teacher and student start from the same weights, so reverse KL is ~0 until
    the student updates. For a true distillation signal, use a stronger /
-   differently trained teacher checkpoint.
+   differently trained teacher (or `--opd-type vllm` with Qwen3-32B).
 
-## References
+# References
 
 1. https://thinkingmachines.ai/blog/on-policy-distillation/
 2. https://arxiv.org/abs/2306.13649
