@@ -1,10 +1,6 @@
 #!/bin/bash
 
 # usage: bash examples/on_policy_distillation/run-qwen3-8B-opd.sh
-#
-# OPD with external vLLM teacher: Qwen3-8B student + Qwen3-32B teacher.
-# GPU layout (8×GPU): 0-3 student train+rollout (colocate), 4-7 teacher vLLM (TP=4).
-# Hyperparams below were validated on 8×A800 80GB (GSM8K +8.5 pp).
 
 set -ex
 
@@ -23,7 +19,7 @@ TEACHER_IP="127.0.0.1"
 TEACHER_PORT=13141
 LOG_FILE="/tmp/vllm_teacher_$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6).log"
 
-## Launch the teacher model server in the background (GPUs 4-7)
+## Launch the teacher model server in the background
 CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m vllm.entrypoints.openai.api_server \
     --model /root/Qwen3-32B \
     --host 0.0.0.0 \
@@ -39,7 +35,7 @@ TEACHER_PID=$!
 
 echo "Starting teacher model server (pid=${TEACHER_PID})..."
 
-## Wait for the teacher model server to be ready (/health returns empty body)
+## Wait for the teacher model server to be ready
 for i in $(seq 1 120); do
     if ! kill -0 "${TEACHER_PID}" 2>/dev/null; then
         echo "ERROR: Teacher server process died. Check ${LOG_FILE}"
@@ -67,7 +63,6 @@ source "/root/vime/scripts/models/qwen3-8B.sh"
 CKPT_ARGS=(
    --hf-checkpoint /root/Qwen3-8B
    --ref-load /root/Qwen3-8B_torch_dist
-   # First run: load from converted torch_dist. For resume, set --load to --save path.
    --load /root/Qwen3-8B_torch_dist
    --save /root/Qwen3-8B_vime/
    --save-interval 20
@@ -83,8 +78,6 @@ ROLLOUT_ARGS=(
    --num-rollout 300
    --rollout-batch-size 16
    --n-samples-per-prompt 4
-   # 4096 response / 8192 context: validated for 8B colocate on 80GB GPUs.
-   # Longer responses need more memory (raise carefully with max-tokens-per-gpu).
    --rollout-max-response-len 4096
    --rollout-max-context-len 8192
    --rollout-temperature 1
@@ -100,8 +93,6 @@ RM_ARGS=(
 )
 
 EVAL_ARGS=(
-   # In-training eval is currently incompatible with OPD reward_func (returns a
-   # dict; eval logging expects scalar rewards). Prefer offline eval after training.
    # --eval-interval 50
    # --eval-prompt-data gsm8k /root/gsm8k/test.parquet
    # --eval-input-key messages
@@ -169,7 +160,7 @@ MISC_ARGS=(
    --make-vocab-size-divisible-by 128
 )
 
-# Student uses GPUs 0-3 (teacher already occupies 4-7)
+# launch the master node of ray in container
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 4 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265

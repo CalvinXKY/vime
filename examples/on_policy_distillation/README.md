@@ -77,7 +77,7 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
 bash examples/on_policy_distillation/run-qwen3-8B-opd.sh
 ```
 
-GPU layout (8×GPU):
+GPU layout:
 
 | GPUs | Role |
 |------|------|
@@ -115,9 +115,8 @@ bash examples/on_policy_distillation/run-qwen3-8B-opd-megatron.sh
 
 # Preliminary Results
 
-End-to-end run with `run-qwen3-8B-opd.sh` on 8×A800 80GB (dapo-math-17k train,
-GRPO + `--opd-kl-coef 1.0`, ~220 rollouts / iter_0000219). Offline GSM8K greedy
-eval:
+End-to-end run with `run-qwen3-8B-opd.sh` (dapo-math-17k train, GRPO +
+`--opd-kl-coef 1.0`, ~220 rollouts / iter_0000219). Offline GSM8K greedy eval:
 
 | Model | GSM8K Accuracy |
 |-------|----------------|
@@ -127,18 +126,6 @@ eval:
 
 Training health signal: `rollout/opd_reverse_kl` dropped from 0.145 → ~0.10
 (−38%). Pure OPD uses `raw_reward=0`; the learning signal is the OPD KL term.
-
-Notes from the validated run:
-
-- Colocate memory is tight for 8B+32B; keep `--rollout-max-response-len 4096`,
-  `--rollout-max-context-len 8192`, `--max-tokens-per-gpu 2048`, and
-  `--vllm-gpu-memory-utilization 0.25` unless you have more headroom.
-- Teacher vLLM needs `--max-model-len 16384` and `--disable-custom-all-reduce`
-  for TP=4 stability.
-- Prefer offline eval after training; in-training eval is currently incompatible
-  with OPD's custom reward payload.
-- Megatron checkpoints are large (~100GB each); plan disk or lower
-  `--save-interval`.
 
 # FAQ
 

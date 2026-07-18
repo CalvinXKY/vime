@@ -1,18 +1,13 @@
 #!/bin/bash
 
-# usage: bash examples/on_policy_distillation/run-qwen3-8B-opd-megatron.sh
-#
-# On-Policy Distillation with Megatron-based teacher model.
-# This example uses the original model as the teacher (self-distillation for demonstration).
+# On-Policy Distillation with Megatron-based teacher model
+# This example uses the original model as the teacher (self-distillation for demonstration)
 #
 # IMPORTANT: This is just an example configuration!
 # In practice, you should:
 # 1. Use a different (stronger) model as the teacher
 # 2. Adjust --opd-kl-coef based on your task
-# 3. Prefer --opd-type vllm (run-qwen3-8B-opd.sh) when the teacher is larger
-#
-# Memory note (8×A800 80GB): student + teacher both Qwen3-8B on 4 training GPUs
-# is tight. Defaults use TP=4, full recompute, and lower token budget.
+# 3. Configure proper evaluation metrics
 
 set -ex
 
