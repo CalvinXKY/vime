@@ -334,6 +334,32 @@ def test_vime_validate_args_dapo_recipe_defaults(monkeypatch):
 
 
 @pytest.mark.unit
+def test_vime_validate_args_dapo_requires_rollout_max_response_len(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        advantage_estimator="dapo",
+        rollout_max_response_len=None,
+        soft_overlong_cache=None,
+    )
+
+    with pytest.raises(ValueError, match="rollout-max-response-len"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_vime_validate_args_soft_overlong_requires_rollout_max_response_len(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        advantage_estimator="grpo",
+        soft_overlong_cache=256,
+        rollout_max_response_len=None,
+    )
+
+    with pytest.raises(ValueError, match="rollout-max-response-len"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
 def test_update_weight_delta_disabled(monkeypatch):
     module = load_vime_arguments_module(monkeypatch)
     for transport, colocate in (("nccl", False), ("tensor", False), ("nccl", True)):

@@ -1884,6 +1884,11 @@ def vime_validate_args(args):
                 "vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std."
             )
         if args.soft_overlong_cache is None:
+            if args.rollout_max_response_len is None:
+                raise ValueError(
+                    "DAPO Soft Overlong requires --rollout-max-response-len to be set "
+                    "(or pass --soft-overlong-cache 0 to disable Soft Overlong)."
+                )
             args.soft_overlong_cache = max(1, int(args.rollout_max_response_len) // 4)
             logger.info(
                 "DAPO: enabling Soft Overlong with --soft-overlong-cache %s.",
@@ -1898,8 +1903,11 @@ def vime_validate_args(args):
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
 
-    if args.soft_overlong_cache is not None and args.soft_overlong_cache < 0:
-        raise ValueError(f"--soft-overlong-cache must be >= 0, got {args.soft_overlong_cache}.")
+    if args.soft_overlong_cache is not None:
+        if args.soft_overlong_cache < 0:
+            raise ValueError(f"--soft-overlong-cache must be >= 0, got {args.soft_overlong_cache}.")
+        if args.soft_overlong_cache > 0 and args.rollout_max_response_len is None:
+            raise ValueError("--rollout-max-response-len must be set when --soft-overlong-cache is enabled.")
 
     if args.advantage_estimator == "cispo" and args.eps_clip < 1.0:
         logger.warning(
