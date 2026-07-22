@@ -1908,6 +1908,16 @@ def vime_validate_args(args):
             raise ValueError(f"--soft-overlong-cache must be >= 0, got {args.soft_overlong_cache}.")
         if args.soft_overlong_cache > 0 and args.rollout_max_response_len is None:
             raise ValueError("--rollout-max-response-len must be set when --soft-overlong-cache is enabled.")
+        if (
+            args.soft_overlong_cache > 0
+            and args.rollout_max_response_len is not None
+            and args.soft_overlong_cache > args.rollout_max_response_len
+        ):
+            raise ValueError(
+                f"--soft-overlong-cache ({args.soft_overlong_cache}) must be <= "
+                f"--rollout-max-response-len ({args.rollout_max_response_len}). "
+                "L_cache should not exceed the maximum response length."
+            )
 
     if args.advantage_estimator == "cispo" and args.eps_clip < 1.0:
         logger.warning(
