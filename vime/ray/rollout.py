@@ -687,12 +687,31 @@ class RolloutManager:
             return self.custom_reward_post_process_func(self.args, samples)
 
         raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
+        rewards_for_norm = raw_rewards
+
+        # Soft Overlong Punishment (DAPO Eq.13), applied before group normalization.
+        soft_overlong_cache = getattr(self.args, "soft_overlong_cache", None)
+        if soft_overlong_cache is not None and soft_overlong_cache > 0:
+            L_max = int(self.args.rollout_max_response_len)
+            L_cache = int(soft_overlong_cache)
+            shaped_rewards = []
+            for sample, reward in zip(samples, raw_rewards, strict=True):
+                response_len = int(sample.response_length)
+                if response_len <= L_max - L_cache:
+                    length_penalty = 0.0
+                elif response_len <= L_max:
+                    length_penalty = ((L_max - L_cache) - response_len) / float(L_cache)
+                else:
+                    length_penalty = -1.0
+                shaped_rewards.append(float(reward) + length_penalty)
+            rewards_for_norm = shaped_rewards
+
         if (
-            self.args.advantage_estimator in ["grpo", "gspo", "cispo", "reinforce_plus_plus_baseline"]
+            self.args.advantage_estimator in ["grpo", "gspo", "cispo", "dapo", "reinforce_plus_plus_baseline"]
             and self.args.rewards_normalization
         ):
             # group norm
-            rewards = torch.tensor(raw_rewards, dtype=torch.float)
+            rewards = torch.tensor(rewards_for_norm, dtype=torch.float)
             if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
                 rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
             else:
@@ -701,13 +720,13 @@ class RolloutManager:
             mean = rewards.mean(dim=-1, keepdim=True)
             rewards = rewards - mean
 
-            if self.args.advantage_estimator in ["grpo", "gspo", "cispo"] and self.args.grpo_std_normalization:
+            if self.args.advantage_estimator in ["grpo", "gspo", "cispo", "dapo"] and self.args.grpo_std_normalization:
                 std = rewards.std(dim=-1, keepdim=True)
                 rewards = rewards / (std + 1e-6)
 
             return raw_rewards, rewards.flatten().tolist()
 
-        return raw_rewards, raw_rewards
+        return raw_rewards, rewards_for_norm
 
     def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
         """

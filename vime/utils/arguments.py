@@ -890,6 +890,18 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
             parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
             parser.add_argument(
+                "--soft-overlong-cache",
+                type=int,
+                default=None,
+                help=(
+                    "Soft Overlong Punishment cache length L_cache from DAPO. "
+                    "When set to a positive value, responses longer than "
+                    "(rollout_max_response_len - soft_overlong_cache) receive a linear length penalty "
+                    "before group reward normalization. Set to 0 to disable. "
+                    "With --advantage-estimator dapo, defaults to rollout_max_response_len // 4."
+                ),
+            )
+            parser.add_argument(
                 "--eps-clip-c",
                 type=float,
                 default=None,
@@ -935,6 +947,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "grpo",
                     "gspo",
                     "cispo",
+                    "dapo",
                     "reinforce_plus_plus",
                     "reinforce_plus_plus_baseline",
                     "ppo",
@@ -1854,8 +1867,39 @@ def vime_validate_args(args):
         assert args.use_dynamic_batch_size, "--balance-by-flops requires --use-dynamic-batch-size"
         args.balance_data = True
 
+    if args.advantage_estimator == "dapo":
+        # DAPO defaults: Clip-Higher + token-level loss + dynamic sampling + Soft Overlong.
+        if args.eps_clip_high is None:
+            args.eps_clip_high = 0.28
+            logger.info("DAPO: setting --eps-clip-high to 0.28 (Clip-Higher).")
+        if not args.calculate_per_token_loss:
+            args.calculate_per_token_loss = True
+            logger.info("DAPO: enabling --calculate-per-token-loss.")
+        if args.dynamic_sampling_filter_path is None:
+            args.dynamic_sampling_filter_path = (
+                "vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
+            )
+            logger.info(
+                "DAPO: enabling dynamic sampling filter "
+                "vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std."
+            )
+        if args.soft_overlong_cache is None:
+            args.soft_overlong_cache = max(1, int(args.rollout_max_response_len) // 4)
+            logger.info(
+                "DAPO: enabling Soft Overlong with --soft-overlong-cache %s.",
+                args.soft_overlong_cache,
+            )
+        if args.custom_reward_post_process_path is not None and args.soft_overlong_cache:
+            logger.warning(
+                "DAPO Soft Overlong (--soft-overlong-cache) is skipped when "
+                "--custom-reward-post-process-path is set; apply length penalty in the custom function if needed."
+            )
+
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
+
+    if args.soft_overlong_cache is not None and args.soft_overlong_cache < 0:
+        raise ValueError(f"--soft-overlong-cache must be >= 0, got {args.soft_overlong_cache}.")
 
     if args.advantage_estimator == "cispo" and args.eps_clip < 1.0:
         logger.warning(
@@ -1981,6 +2025,18 @@ def vime_validate_args(args):
         f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
         f"rollout_batch_size {args.rollout_batch_size}"
     )
+
+    if (
+        args.advantage_estimator == "dapo"
+        and args.dynamic_sampling_filter_path is not None
+        and args.over_sampling_batch_size <= args.rollout_batch_size
+    ):
+        logger.warning(
+            "DAPO dynamic sampling is more effective when "
+            "--over-sampling-batch-size > --rollout-batch-size "
+            f"(got over_sampling_batch_size={args.over_sampling_batch_size}, "
+            f"rollout_batch_size={args.rollout_batch_size})."
+        )
 
     if args.num_epoch is not None:
         if args.num_rollout is not None:

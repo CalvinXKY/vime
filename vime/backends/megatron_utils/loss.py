@@ -670,7 +670,7 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
 
     This function extracts rewards, log-probs, values, and masks from
     `rollout_data`, computes KL divergences, then applies the chosen advantage
-    estimator. Supported methods: "grpo", "gspo", "cispo", "ppo",
+    estimator. Supported methods: "grpo", "gspo", "cispo", "dapo", "ppo",
     "reinforce_plus_plus", and "reinforce_plus_plus_baseline". When
     `args.normalize_advantages` is True, advantages are whitened across the
     data-parallel group using masked statistics.
@@ -724,7 +724,7 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
         custom_adv_fn(args, rollout_data)
         advantages, returns = rollout_data["advantages"], rollout_data["returns"]
 
-    elif args.advantage_estimator in ["grpo", "gspo", "cispo"]:
+    elif args.advantage_estimator in ["grpo", "gspo", "cispo", "dapo"]:
         rewards = torch.tensor(rewards, dtype=torch.float32, device=kl[0].device)
         returns = get_grpo_returns(rewards, kl)
         # TODO: is the copy necessary?

@@ -197,6 +197,7 @@ The recommended contract is to put the source identifier in `metadata["source_na
     - `grpo` ([https://arxiv.org/abs/2402.03300](https://arxiv.org/abs/2402.03300))
     - `gspo` ([https://arxiv.org/abs/2507.18071](https://arxiv.org/abs/2507.18071))
     - `cispo` ([https://arxiv.org/abs/2506.13585](https://arxiv.org/abs/2506.13585))
+    - `dapo` ([https://arxiv.org/abs/2503.14476](https://arxiv.org/abs/2503.14476))
     - `reinforce_plus_plus` and `reinforce_plus_plus_baseline` ([https://arxiv.org/abs/2501.03262](https://arxiv.org/abs/2501.03262))
     - `ppo` ([https://arxiv.org/abs/1707.06347](https://arxiv.org/abs/1707.06347))
 - `--calculate-per-token-loss`: By default, vime calculates loss on a per-sample basis, i.e., `mean(sum(sample_i) / len(sample_i))`. Enable this flag to calculate loss on a per-token basis, i.e., `sum(sum(sample_i)) / sum(len(sample_i))`.
@@ -223,6 +224,38 @@ Related parameters:
 - `--n-samples-per-prompt`: Number of responses sampled per prompt for intra-group comparison.
 - `--normalize-advantages`: Whether to normalize advantages.
 - `--eps-clip`: PPO-style clip range.
+
+#### DAPO Algorithm
+
+DAPO (Decoupled Clip and Dynamic sAmpling Policy Optimization, https://arxiv.org/abs/2503.14476) optimizes the policy with group-relative advantages, Clip-Higher, token-level loss, dynamic sampling, and Soft Overlong. Selecting `dapo` enables these mechanisms with the default settings below.
+
+To use DAPO, set:
+
+```bash
+--advantage-estimator dapo
+--n-samples-per-prompt 8
+--rollout-batch-size 32
+--over-sampling-batch-size 64
+```
+
+When `dapo` is selected and not explicitly overridden, vime automatically sets:
+
+- `--eps-clip-high 0.28` (with default `--eps-clip 0.2` for Clip-Higher);
+- `--calculate-per-token-loss`;
+- `--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`;
+- `--soft-overlong-cache` to `rollout_max_response_len // 4`.
+
+Related parameters:
+
+- `--eps-clip` / `--eps-clip-high`: Asymmetric clip bounds;
+- `--calculate-per-token-loss`: Reduce policy loss at token level instead of per-sample;
+- `--over-sampling-batch-size`: Preferably larger than `--rollout-batch-size` for effective dynamic sampling;
+- `--dynamic-sampling-filter-path`: Drop prompt groups whose reward std is ~0 (all-correct / all-incorrect);
+- `--soft-overlong-cache`: Soft Overlong `L_cache`; set to `0` to disable. The length penalty is added to rewards before group normalization;
+- `--partial-rollout`: Optional; resume aborted generations during dynamic sampling;
+- `--rm-type dapo`: Only the DAPO-style math answer scorer, not the full DAPO recipe.
+
+Note: if `--custom-reward-post-process-path` is set, the built-in Soft Overlong path is skipped; implement the length penalty in your custom function if needed.
 
 #### PPO Algorithm
 

@@ -199,6 +199,7 @@ vLLM 的加载非常简单，只需要：
   - `grpo`（https://arxiv.org/abs/2402.03300）；
   - `gspo`（https://arxiv.org/abs/2507.18071）；
   - `cispo`（https://arxiv.org/abs/2506.13585）；
+  - `dapo`（https://arxiv.org/abs/2503.14476）；
   - `reinforce_plus_plus` 与 `reinforce_plus_plus_baseline`（https://arxiv.org/abs/2501.03262）；
   - `ppo`（https://arxiv.org/abs/1707.06347）。
 - `--calculate-per-token-loss`：vime 中默认的方案是 per sample loss，即 `mean(sum(sample_i) / len(sample_i))`，如果需要计算 per token loss，即 `sum(sum(sample_i)) / sum(len(sample_i))`，可以开启 `--calculate-per-token-loss`；
@@ -225,6 +226,38 @@ GRPO 的主要特点：
 - `--n-samples-per-prompt`：每个 prompt 采样的 response 数量，用于组内比较；
 - `--normalize-advantages`：是否对 advantage 进行归一化；
 - `--eps-clip`：PPO 风格的 clip 范围。
+
+#### DAPO 算法
+
+DAPO（Decoupled Clip and Dynamic sAmpling Policy Optimization，https://arxiv.org/abs/2503.14476）通过组内相对 advantage、Clip-Higher、token-level loss、dynamic sampling 与 Soft Overlong 进行策略优化。选择 `dapo` 后，这些机制会按默认配置启用。
+
+使用 DAPO 时，需要设置：
+
+```bash
+--advantage-estimator dapo
+--n-samples-per-prompt 8
+--rollout-batch-size 32
+--over-sampling-batch-size 64
+```
+
+选择 `dapo` 后，若未显式覆盖，会自动设置：
+
+- `--eps-clip-high 0.28`（与默认 `--eps-clip 0.2` 构成 Clip-Higher）；
+- `--calculate-per-token-loss`；
+- `--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`；
+- `--soft-overlong-cache` 为 `rollout_max_response_len // 4`。
+
+相关参数：
+
+- `--eps-clip` / `--eps-clip-high`：非对称 clip 上下界；
+- `--calculate-per-token-loss`：按 token 而非按 sample 归约 policy loss；
+- `--over-sampling-batch-size`：建议大于 `--rollout-batch-size`，配合 dynamic sampling 过采样；
+- `--dynamic-sampling-filter-path`：过滤组内 reward std≈0（全对/全错）的 prompt 组；
+- `--soft-overlong-cache`：Soft Overlong 的 L_cache；设为 `0` 可关闭。长度惩罚在 group reward 归一化之前叠加到 reward 上；
+- `--partial-rollout`：可选，动态采样 abort 后的续写加速；
+- `--rm-type dapo`：仅表示 DAPO 论文配套的数学答案打分器，不等于完整 DAPO 配方。
+
+注意：若同时设置 `--custom-reward-post-process-path`，内置 Soft Overlong 不会生效，需要在自定义函数中自行实现长度惩罚。
 
 #### PPO 算法
 
