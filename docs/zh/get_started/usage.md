@@ -243,17 +243,17 @@ DAPO（Decoupled Clip and Dynamic sAmpling Policy Optimization，https://arxiv.o
 选择 `dapo` 后，若未显式覆盖，会自动设置：
 
 - `--eps-clip-high 0.28`（与默认 `--eps-clip 0.2` 构成 Clip-Higher）；
-- `--calculate-per-token-loss`；
+- `--calculate-per-token-loss`（DAPO 要求 token-level loss，选择 `dapo` 时会强制开启）；
 - `--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`；
 - `--soft-overlong-cache` 为 `rollout_max_response_len // 4`。
 
 相关参数：
 
 - `--eps-clip` / `--eps-clip-high`：非对称 clip 上下界；
-- `--calculate-per-token-loss`：按 token 而非按 sample 归约 policy loss；
+- `--calculate-per-token-loss`：按 token 而非按 sample 归约 policy loss；选择 `dapo` 时为强制项；
 - `--over-sampling-batch-size`：建议大于 `--rollout-batch-size`，配合 dynamic sampling 过采样；
 - `--dynamic-sampling-filter-path`：过滤组内 reward std≈0（全对/全错）的 prompt 组；
-- `--soft-overlong-cache`：Soft Overlong 的 L_cache；设为 `0` 可关闭。长度惩罚在 group reward 归一化之前叠加到 reward 上；
+- `--soft-overlong-cache`：Soft Overlong 的 L_cache；设为 `0` 可关闭。长度惩罚在 group reward 归一化之前叠加到 reward 上，因此无论是否启用 rewards normalization，Soft Overlong 都会生效；
 - `--partial-rollout`：可选，动态采样 abort 后的续写加速；
 - `--rm-type dapo`：仅表示 DAPO 论文配套的数学答案打分器，不等于完整 DAPO 配方。
 

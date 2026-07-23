@@ -1874,7 +1874,7 @@ def vime_validate_args(args):
             logger.info("DAPO: setting --eps-clip-high to 0.28 (Clip-Higher).")
         if not args.calculate_per_token_loss:
             args.calculate_per_token_loss = True
-            logger.info("DAPO: enabling --calculate-per-token-loss.")
+            logger.info("DAPO: --calculate-per-token-loss is mandatory for DAPO and has been enabled.")
         if args.dynamic_sampling_filter_path is None:
             args.dynamic_sampling_filter_path = (
                 "vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"

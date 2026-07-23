@@ -241,17 +241,17 @@ To use DAPO, set:
 When `dapo` is selected and not explicitly overridden, vime automatically sets:
 
 - `--eps-clip-high 0.28` (with default `--eps-clip 0.2` for Clip-Higher);
-- `--calculate-per-token-loss`;
+- `--calculate-per-token-loss` (mandatory for DAPO; selecting `dapo` always enables it);
 - `--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`;
 - `--soft-overlong-cache` to `rollout_max_response_len // 4`.
 
 Related parameters:
 
 - `--eps-clip` / `--eps-clip-high`: Asymmetric clip bounds;
-- `--calculate-per-token-loss`: Reduce policy loss at token level instead of per-sample;
+- `--calculate-per-token-loss`: Reduce policy loss at token level instead of per-sample; mandatory when using `dapo`;
 - `--over-sampling-batch-size`: Preferably larger than `--rollout-batch-size` for effective dynamic sampling;
 - `--dynamic-sampling-filter-path`: Drop prompt groups whose reward std is ~0 (all-correct / all-incorrect);
-- `--soft-overlong-cache`: Soft Overlong `L_cache`; set to `0` to disable. The length penalty is added to rewards before group normalization;
+- `--soft-overlong-cache`: Soft Overlong `L_cache`; set to `0` to disable. The length penalty is added to rewards before group normalization, so Soft Overlong still applies even when rewards normalization is disabled;
 - `--partial-rollout`: Optional; resume aborted generations during dynamic sampling;
 - `--rm-type dapo`: Only the DAPO-style math answer scorer, not the full DAPO recipe.
 
