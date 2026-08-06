@@ -26,7 +26,9 @@ from vime.utils.http_utils import get, get_rollout_num_engines, post
 from vime.utils.misc import SingletonMeta, load_function
 from vime.utils.processing_utils import (
     build_processor_kwargs,
+    encode_audio_for_rollout_engine,
     encode_image_for_rollout_engine,
+    encode_video_for_rollout_engine,
     load_processor,
     load_tokenizer,
 )
@@ -361,7 +363,11 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
     inference_sampling_params = _build_inference_sampling_params(sampling_params)
 
-    images = sample.multimodal_inputs.get("images") if sample.multimodal_inputs else None
+    mm_inputs = sample.multimodal_inputs or {}
+    images = mm_inputs.get("images")
+    videos = mm_inputs.get("videos")
+    audios = mm_inputs.get("audio")
+    has_mm_media = bool(images) or bool(videos) or bool(audios)
 
     if not sample.tokens:
         sample.tokens = prompt_ids
@@ -372,12 +378,19 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         if getattr(args, "router_policy", None) == "consistent_hash":
             headers = {"x-session-id": sample.session_id}
 
-    # Prepare payload for vLLM server
-    if images:
+    # Prepare payload for vLLM server. Any image/audio/video must go through
+    # /render so vLLM runs the matching encoders (and optional feature dumps).
+    if has_mm_media:
         content: list[dict[str, Any]] = [{"type": "text", "text": sample.prompt}]
-        for image in images:
+        for image in images or []:
             data_url = encode_image_for_rollout_engine(image)
             content.append({"type": "image_url", "image_url": {"url": data_url}})
+        for audio in audios or []:
+            audio_url = encode_audio_for_rollout_engine(audio)
+            content.append({"type": "audio_url", "audio_url": {"url": audio_url}})
+        for video in videos or []:
+            video_url = encode_video_for_rollout_engine(video)
+            content.append({"type": "video_url", "video_url": {"url": video_url}})
         render_payload = {
             "model": args.hf_checkpoint,
             "messages": [{"role": "user", "content": content}],

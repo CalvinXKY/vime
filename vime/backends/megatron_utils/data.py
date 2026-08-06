@@ -147,17 +147,41 @@ def get_batch(
     assert loss_masks.shape == tokens.shape, f"loss_masks.shape: {loss_masks.shape}, tokens.shape: {tokens.shape}"
     batch["full_loss_masks"] = loss_masks
 
-    # Process multimodal training tensors if present
+    # Process multimodal training tensors if present.
+    # Audio input_features (1, 128, L) and feature_attention_mask (1, L) have
+    # variable L across samples; pad the audio-length dim to batch max before cat.
+    # Other tensors (pixel_values (N,1536), image_grid_thw (1,3)) use dim=0 cat.
+    # Note: train/infer audio fingerprints must ignore this pad — the Omni bridge
+    # flattens with feature_attention_mask before summing, matching vLLM dumps.
     multimodal_train_inputs = batch.get("multimodal_train_inputs", None)
     if multimodal_train_inputs is not None:
-        multimodal_data = {}  # key -> concatenated tensor
+        per_key_tensors = {}  # key -> list of per-sample tensors
         for mm_input_dict in multimodal_train_inputs:
             if mm_input_dict is not None:
                 for key, mm_tensor in mm_input_dict.items():
-                    if key not in multimodal_data:
-                        multimodal_data[key] = mm_tensor
-                    else:
-                        multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=0)
+                    per_key_tensors.setdefault(key, []).append(mm_tensor)
+        multimodal_data = {}
+        for key, tensors in per_key_tensors.items():
+            # Some processor outputs (e.g. video_second_per_grid) are plain
+            # Python lists/floats, not tensors. Convert them so downstream
+            # torch ops and the bridge forward() receive proper tensors.
+            tensors = [t if isinstance(t, torch.Tensor) else torch.as_tensor(t) for t in tensors]
+            if len(tensors) == 1:
+                multimodal_data[key] = tensors[0]
+                continue
+            if key == "input_features":
+                # (1, 128, L) -> pad dim=2 to max L, then cat dim=0
+                max_len = max(t.shape[2] for t in tensors)
+                padded = [F.pad(t, (0, max_len - t.shape[2]), value=0) for t in tensors]
+                multimodal_data[key] = torch.cat(padded, dim=0)
+            elif key == "feature_attention_mask":
+                # (1, L) -> pad dim=1 to max L, then cat dim=0
+                max_len = max(t.shape[1] for t in tensors)
+                padded = [F.pad(t, (0, max_len - t.shape[1]), value=0) for t in tensors]
+                multimodal_data[key] = torch.cat(padded, dim=0)
+            else:
+                # Default: concat on dim=0 (works for pixel_values, image_grid_thw)
+                multimodal_data[key] = torch.cat(tensors, dim=0)
         batch["multimodal_train_inputs"] = multimodal_data
 
     return batch

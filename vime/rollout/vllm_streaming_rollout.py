@@ -44,7 +44,12 @@ from vime.rollout.vllm_rollout import (
     prime_encoder,
 )
 from vime.utils import http_utils
-from vime.utils.processing_utils import build_processor_kwargs, encode_image_for_rollout_engine
+from vime.utils.processing_utils import (
+    build_processor_kwargs,
+    encode_audio_for_rollout_engine,
+    encode_image_for_rollout_engine,
+    encode_video_for_rollout_engine,
+)
 from vime.utils.trace_utils import build_vllm_meta_trace_attrs, trace_span
 from vime.utils.types import Sample
 
@@ -92,7 +97,11 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
     base_prompt_ids = _base_dataset_prompt_ids(sample, state.tokenizer, state.processor)
 
-    images = sample.multimodal_inputs.get("images") if sample.multimodal_inputs else None
+    mm_inputs = sample.multimodal_inputs or {}
+    images = mm_inputs.get("images")
+    videos = mm_inputs.get("videos")
+    audios = mm_inputs.get("audio")
+    has_mm_media = bool(images) or bool(videos) or bool(audios)
 
     params = dict(sampling_params)
     if len(sample.response) > 0:
@@ -119,10 +128,14 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         headers = {"x-session-id": sample.session_id}
 
     payload: dict[str, Any]
-    if images:
+    if has_mm_media:
         content: list[dict[str, Any]] = [{"type": "text", "text": sample.prompt}]
-        for image in images:
+        for image in images or []:
             content.append({"type": "image_url", "image_url": {"url": encode_image_for_rollout_engine(image)}})
+        for audio in audios or []:
+            content.append({"type": "audio_url", "audio_url": {"url": encode_audio_for_rollout_engine(audio)}})
+        for video in videos or []:
+            content.append({"type": "video_url", "video_url": {"url": encode_video_for_rollout_engine(video)}})
         render_payload = {"model": args.hf_checkpoint, "messages": [{"role": "user", "content": content}]}
         await prime_encoder(args, render_payload["messages"])
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
