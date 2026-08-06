@@ -807,7 +807,7 @@ class Qwen3OmniMoeVLModel(MegatronModule):
                             if call_idx in used_call_indices:
                                 continue
                             try:
-                                saved = torch.load(call_file, map_location="cpu", weights_only=False)
+                                saved = torch.load(call_file, map_location="cpu", weights_only=True)
                                 saved_grid_thw = saved.get("grid_thw", None)
                                 if saved_grid_thw is not None:
                                     saved_grid_thw_list = (
@@ -987,7 +987,7 @@ class Qwen3OmniMoeVLModel(MegatronModule):
                     file_index = {}  # fingerprint_rounded -> list of (file, audio_output)
                     for call_file in all_files:
                         try:
-                            saved = torch.load(call_file, map_location="cpu", weights_only=False)
+                            saved = torch.load(call_file, map_location="cpu", weights_only=True)
                             saved_fp = saved.get("input_fingerprint", None)
                             saved_audio = saved.get("audio_output", None)
                             if saved_fp is not None and saved_audio is not None:

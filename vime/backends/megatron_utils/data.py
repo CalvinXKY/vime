@@ -165,19 +165,20 @@ def get_batch(
             # Some processor outputs (e.g. video_second_per_grid) are plain
             # Python lists/floats, not tensors. Convert them so downstream
             # torch ops and the bridge forward() receive proper tensors.
-            tensors = [t if isinstance(t, torch.Tensor) else torch.as_tensor(t) for t in tensors]
+            device = next((t.device for t in tensors if isinstance(t, torch.Tensor)), None)
+            tensors = [t if isinstance(t, torch.Tensor) else torch.as_tensor(t, device=device) for t in tensors]
             if len(tensors) == 1:
                 multimodal_data[key] = tensors[0]
                 continue
             if key == "input_features":
-                # (1, 128, L) -> pad dim=2 to max L, then cat dim=0
-                max_len = max(t.shape[2] for t in tensors)
-                padded = [F.pad(t, (0, max_len - t.shape[2]), value=0) for t in tensors]
+                # (..., L) -> pad last dim to max L, then cat dim=0
+                max_len = max(t.shape[-1] for t in tensors)
+                padded = [F.pad(t, (0, max_len - t.shape[-1]), value=0) for t in tensors]
                 multimodal_data[key] = torch.cat(padded, dim=0)
             elif key == "feature_attention_mask":
-                # (1, L) -> pad dim=1 to max L, then cat dim=0
-                max_len = max(t.shape[1] for t in tensors)
-                padded = [F.pad(t, (0, max_len - t.shape[1]), value=0) for t in tensors]
+                # (..., L) -> pad last dim to max L, then cat dim=0
+                max_len = max(t.shape[-1] for t in tensors)
+                padded = [F.pad(t, (0, max_len - t.shape[-1]), value=0) for t in tensors]
                 multimodal_data[key] = torch.cat(padded, dim=0)
             else:
                 # Default: concat on dim=0 (works for pixel_values, image_grid_thw)
