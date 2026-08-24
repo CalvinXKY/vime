@@ -1,219 +1,239 @@
-diff --git a/vllm/engine/protocol.py b/vllm/engine/protocol.py
-index 7d5cc164f..c54123bea 100644
---- a/vllm/engine/protocol.py
-+++ b/vllm/engine/protocol.py
-@@ -248,6 +248,10 @@ class EngineClient(ABC):
-         """Start a new weight update."""
-         raise NotImplementedError
-
-+    async def start_draft_weight_update(self) -> None:
-+        """Start a new weight update targeting the speculative draft model."""
-+        raise NotImplementedError
-+
-     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
-         """Batched weight update for RL training."""
-         raise NotImplementedError
-diff --git a/vllm/entrypoints/llm.py b/vllm/entrypoints/llm.py
-index a3ed94ee0..014a67006 100644
---- a/vllm/entrypoints/llm.py
-+++ b/vllm/entrypoints/llm.py
-@@ -877,6 +877,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
-         """Start a new weight update."""
-         self.llm_engine.collective_rpc("start_weight_update")
-
-+    def start_draft_weight_update(self) -> None:
-+        """Start a new weight update targeting the speculative draft model."""
-+        self.llm_engine.collective_rpc("start_draft_weight_update")
-+
-     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
-         """
-         Update the weights of the model.
-diff --git a/vllm/entrypoints/serve/dev/rlhf/api_router.py b/vllm/entrypoints/serve/dev/rlhf/api_router.py
-index 310e4021e..5754ecc59 100644
---- a/vllm/entrypoints/serve/dev/rlhf/api_router.py
-+++ b/vllm/entrypoints/serve/dev/rlhf/api_router.py
-@@ -91,6 +91,47 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
-         )
-
-
-+@router.post("/abort_requests")
-+async def abort_requests(raw_request: Request) -> JSONResponse:
-+    """Abort in-flight requests without pausing the scheduler.
-+
-+    Empty/missing ``request_ids`` aborts all in-flight requests.
-+    """
-+
-+    engine = engine_client(raw_request)
-+
-+    try:
-+        body = await raw_request.json()
-+    except json.JSONDecodeError as e:
-+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-+
-+    request_ids = body.get("request_ids")
-+
-+    try:
-+        if request_ids:
-+            await engine.abort(request_ids)
-+        else:
-+            from vllm.v1.engine.async_llm import AsyncLLM
-+
-+            assert isinstance(engine, AsyncLLM)
-+            op = engine.output_processor
-+            request_ids = [
-+                *op.request_states.keys(),
-+                *op.parent_requests.keys(),
-+            ]
-+            await engine.abort(request_ids, internal=True)
-+        return JSONResponse(
-+            content={"status": "aborted", "aborted": len(request_ids)},
-+            status_code=HTTPStatus.OK.value,
-+        )
-+    except Exception as err:  # pragma: no cover - defensive
-+        logger.exception("Failed to abort requests")
-+        return JSONResponse(
-+            content={"error": f"Failed to abort requests: {err}"},
-+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-+        )
-+
-+
- @router.get("/is_paused")
- async def is_paused(raw_request: Request) -> JSONResponse:
-     """Return the current pause status."""
-@@ -133,6 +174,12 @@ async def start_weight_update(raw_request: Request):
-     return JSONResponse(content={"message": "Weight update started"})
-
-
-+@router.post("/start_draft_weight_update")
-+async def start_draft_weight_update(raw_request: Request):
-+    await engine_client(raw_request).start_draft_weight_update()
-+    return JSONResponse(content={"message": "Draft weight update started"})
-+
-+
- @router.post("/update_weights")
- async def update_weights(raw_request: Request):
-     try:
-diff --git a/vllm/model_executor/layers/fused_moe/all2all_utils.py b/vllm/model_executor/layers/fused_moe/all2all_utils.py
-index 6af93bfde..3dc364aa4 100644
---- a/vllm/model_executor/layers/fused_moe/all2all_utils.py
-+++ b/vllm/model_executor/layers/fused_moe/all2all_utils.py
-@@ -282,9 +282,7 @@ def maybe_make_prepare_finalize(
-
-     elif moe.use_fi_nvl_one_sided_kernels:
-         assert quant_config is not None
--        max_num_tokens = (
--            get_current_vllm_config().scheduler_config.max_num_batched_tokens
+diff --git a/vllm/distributed/weight_transfer/base.py b/vllm/distributed/weight_transfer/base.py
+index ddefb77da0..ac5cf087f8 100644
+--- a/vllm/distributed/weight_transfer/base.py
++++ b/vllm/distributed/weight_transfer/base.py
+@@ -178,7 +178,9 @@ class WeightTransferInitRequest:
+ class WeightTransferUpdateRequest:
+     """API-level weight update request."""
+ 
+-    update_info: dict[str, Any] = field(default_factory=dict)
++    update_info: dict[str, Any] | list[dict[str, Any] | None] = field(
++        default_factory=dict
++    )
+ 
+ 
+ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
+@@ -374,7 +376,9 @@ class VLLMWeightSyncClient(Protocol):
+ 
+     def start_weight_update(self) -> None: ...
+ 
+-    def update_weights(self, update_info: dict[str, Any]) -> None: ...
++    def update_weights(
++        self, update_info: dict[str, Any] | list[dict[str, Any] | None]
++    ) -> None: ...
+ 
+     def finish_weight_update(self, weight_version: str | None = None) -> None: ...
+ 
+diff --git a/vllm/distributed/weight_transfer/clients.py b/vllm/distributed/weight_transfer/clients.py
+index 12dd0c9eac..528445fba1 100644
+--- a/vllm/distributed/weight_transfer/clients.py
++++ b/vllm/distributed/weight_transfer/clients.py
+@@ -72,10 +72,18 @@ class HTTPVLLMWeightSyncClient:
+     def start_weight_update(self) -> None:
+         self._post("start_weight_update")
+ 
+-    def update_weights(self, update_info: dict[str, Any]) -> None:
+-        self._post(
+-            "update_weights", {"update_info": _json_safe_update_info(update_info)}
 -        )
-+        max_num_tokens = moe.max_num_tokens
-         if quant_config.quant_dtype is None:
-             dispatch_dtype_bytes_per_elem = 2
-             dispatch_scale_bytes_per_token = 0
-diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
-index 61f02092b..8bcd4ba89 100644
---- a/vllm/v1/engine/async_llm.py
-+++ b/vllm/v1/engine/async_llm.py
-@@ -1084,6 +1084,10 @@ class AsyncLLM(EngineClient):
-         """Start a new weight update."""
-         await self.collective_rpc("start_weight_update")
-
-+    async def start_draft_weight_update(self) -> None:
-+        """Start a new weight update targeting the speculative draft model."""
-+        await self.collective_rpc("start_draft_weight_update")
++    def update_weights(
++        self, update_info: dict[str, Any] | list[dict[str, Any] | None]
++    ) -> None:
++        json_update_info: dict[str, Any] | list[dict[str, Any] | None]
++        if isinstance(update_info, list):
++            json_update_info = [
++                _json_safe_update_info(info) if info is not None else None
++                for info in update_info
++            ]
++        else:
++            json_update_info = _json_safe_update_info(update_info)
++        self._post("update_weights", {"update_info": json_update_info})
+ 
+     def finish_weight_update(self, weight_version: str | None = None) -> None:
+         json = (
+@@ -105,7 +113,9 @@ class RayVLLMWeightSyncClient:
+ 
+         ray.get([h.start_weight_update.remote() for h in self.handles])
+ 
+-    def update_weights(self, update_info: dict[str, Any]) -> None:
++    def update_weights(
++        self, update_info: dict[str, Any] | list[dict[str, Any] | None]
++    ) -> None:
+         import ray
+ 
+         request = WeightTransferUpdateRequest(update_info=update_info)
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
+index f304bf677b..5e01e8fca8 100644
+--- a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
+@@ -240,6 +240,8 @@ class GenerateStreamResponse(BaseModel):
+     )
+     choices: list[GenerateResponseStreamChoice]
+     usage: UsageInfo | None = Field(default=None)
++    weight_version: str | None = None
++    request_spec_decode_stats: dict[str, Any] | None = Field(default=None)
+ 
+ 
+ class GenerateResponse(BaseModel):
+@@ -255,6 +257,8 @@ class GenerateResponse(BaseModel):
+     created: int | None = None
+     choices: list[GenerateResponseChoice]
+     usage: UsageInfo | None = Field(default=None)
++    weight_version: str | None = None
++    request_spec_decode_stats: dict[str, Any] | None = Field(default=None)
+     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+ 
+     kv_transfer_params: dict[str, Any] | None = Field(
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
+index 9e9ace877a..3733263bca 100644
+--- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
+@@ -14,5 +14,6 @@ from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
+ from vllm.entrypoints.generate.base.serving import (
+     GenerateBaseServing,
++    build_spec_decoding_metrics,
+     clamp_prompt_logprobs,
+ )
+ from vllm.entrypoints.openai.chat_completion.protocol import (
+@@ -250,6 +251,7 @@ class ServingTokens(GenerateBaseServing):
+         )
+ 
+         assert result_generator is not None
++        weight_version = await self.engine_client.get_weight_version()
+ 
+         if request.stream:
+             return self.serve_tokens_stream_generator(
+@@ -258,10 +260,16 @@ class ServingTokens(GenerateBaseServing):
+                 request_id,
+                 model_name,
+                 request_metadata,
++                weight_version,
+             )
+ 
+         return await self.serve_tokens_full_generator(
+-            request, result_generator, request_id, model_name, request_metadata
++            request,
++            result_generator,
++            request_id,
++            model_name,
++            request_metadata,
++            weight_version,
+         )
+ 
+     async def serve_tokens_full_generator(
+@@ -271,6 +279,7 @@ class ServingTokens(GenerateBaseServing):
+         request_id: str,
+         model_name: str,
+         request_metadata: RequestResponseMetadata,
++        weight_version: str | None,
+     ) -> ErrorResponse | GenerateResponse:
+         created_time = int(time.time())
+         final_res: RequestOutput | None = None
+@@ -342,6 +351,11 @@ class ServingTokens(GenerateBaseServing):
+                 cached_tokens=final_res.num_cached_tokens
+             )
+ 
++        spec_decode_metrics = build_spec_decoding_metrics(final_res)
++        request_spec_decode_stats = (
++            spec_decode_metrics.model_dump() if spec_decode_metrics else None
++        )
 +
-     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
-         """
-         Batched weight update for RL training.
-diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
-index c74307d0b..6bc90d186 100644
---- a/vllm/v1/worker/gpu/model_runner.py
-+++ b/vllm/v1/worker/gpu/model_runner.py
-@@ -371,6 +371,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
-     def get_model(self) -> nn.Module:
-         return self.model
-
-+    def get_draft_model(self) -> nn.Module | None:
-+        if not isinstance(self.speculator, DraftModelSpeculator):
-+            return None
-+        return self.speculator.model
-+
-     def reload_weights(self, *args, **kwargs) -> None:
-         # TODO(Wentao): Use full version instead of import when fully migrated to v2
-         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
-diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
-index e9b23f1c6..102eb8354 100644
---- a/vllm/v1/worker/gpu_model_runner.py
-+++ b/vllm/v1/worker/gpu_model_runner.py
-@@ -3266,6 +3266,17 @@ class GPUModelRunner(
-             return self.model.unwrap()
-         return self.model
-
-+    def get_draft_model(self) -> nn.Module | None:
-+        drafter = getattr(self, "drafter", None)
-+        if drafter is None:
-+            return None
-+        model = getattr(drafter, "model", None)
-+        if isinstance(
-+            model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
-+        ):
-+            return cast(nn.Module, model.unwrap())
-+        return cast(nn.Module | None, model)
-+
-     def get_supported_generation_tasks(self) -> list[GenerationTask]:
-         model = self.get_model()
-         supported_tasks = list[GenerationTask]()
+         request_metadata.final_usage_info = usage
+ 
+         response = GenerateResponse(
+@@ -350,6 +363,8 @@ class ServingTokens(GenerateBaseServing):
+             model=model_name,
+             choices=choices,
+             usage=usage,
++            weight_version=weight_version,
++            request_spec_decode_stats=request_spec_decode_stats,
+             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+             kv_transfer_params=final_res.kv_transfer_params,
+             ec_transfer_params=final_res.ec_transfer_params,
+@@ -383,11 +398,13 @@ class ServingTokens(GenerateBaseServing):
+         request_id: str,
+         model_name: str,
+         request_metadata: RequestResponseMetadata,
++        weight_version: str | None,
+     ) -> AsyncGenerator[str, None]:
+         num_prompt_tokens = 0
+         num_generated_tokens: list[int] = []
+         first_iteration = True
+         num_cached_tokens = None
++        request_spec_decode_stats: dict[str, object] | None = None
+         sampling_params: SamplingParams = request.sampling_params
+ 
+         include_usage, include_continuous_usage = should_include_usage(
+@@ -396,6 +413,9 @@ class ServingTokens(GenerateBaseServing):
+ 
+         try:
+             async for res in result_generator:
++                spec_decode_metrics = build_spec_decoding_metrics(res)
++                if spec_decode_metrics is not None:
++                    request_spec_decode_stats = spec_decode_metrics.model_dump()
+                 if first_iteration:
+                     if res.prompt_token_ids is not None:
+                         num_prompt_tokens = len(res.prompt_token_ids)
+@@ -435,6 +454,8 @@ class ServingTokens(GenerateBaseServing):
+ 
+                     chunk = GenerateStreamResponse(
+                         request_id=request_id,
++                        weight_version=weight_version,
++                        request_spec_decode_stats=request_spec_decode_stats,
+                         choices=[
+                             GenerateResponseStreamChoice(
+                                 index=i,
+@@ -469,6 +490,8 @@ class ServingTokens(GenerateBaseServing):
+             if include_usage:
+                 final_chunk = GenerateStreamResponse(
+                     request_id=request_id,
++                    weight_version=weight_version,
++                    request_spec_decode_stats=request_spec_decode_stats,
+                     choices=[],
+                     usage=final_usage_info,
+                 )
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index 03433ed75..4ce029d58 100644
+index a3b00aaad2..2b05c5e2f5 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
-@@ -905,6 +905,30 @@ class Worker(WorkerBase):
-     def get_model(self) -> nn.Module:
-         return self.model_runner.get_model()
-
-+    def get_draft_model(self) -> nn.Module | None:
-+        return self.model_runner.get_draft_model()
-+
-+    def _select_weight_update_target(self, is_draft: bool) -> None:
-+        assert self.weight_transfer_engine is not None
-+        if not is_draft:
-+            self.weight_transfer_engine.model = self.get_model()
-+            self.weight_transfer_engine.model_config = self.model_config
-+            return
-+
-+        draft_model = self.get_draft_model()
-+        if draft_model is None:
-+            raise RuntimeError(
-+                "Draft model weight update requested, but no draft model is configured."
-+            )
-+        speculative_config = self.speculative_config
-+        if speculative_config is None or speculative_config.draft_model_config is None:
-+            raise RuntimeError(
-+                "Draft model weight update requested, but no draft model config "
-+                "is configured."
-+            )
-+        self.weight_transfer_engine.model = draft_model
-+        self.weight_transfer_engine.model_config = speculative_config.draft_model_config
-+
-     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-         return self.model_runner.get_supported_tasks()
-
-@@ -1162,6 +1186,13 @@ class Worker(WorkerBase):
-         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
-
-     def start_weight_update(self) -> None:
-+        self._start_weight_update(is_draft=False)
-+
-+    def start_draft_weight_update(self) -> None:
-+        """Start a weight update targeting the speculative draft model."""
-+        self._start_weight_update(is_draft=True)
-+
-+    def _start_weight_update(self, *, is_draft: bool) -> None:
-         """
-         Start a new weight update session.
-
-@@ -1178,5 +1209,6 @@ class Worker(WorkerBase):
-                 "active. Call finish_weight_update first."
-             )
-
-+        self._select_weight_update_target(is_draft)
-         self.weight_transfer_engine.start_weight_update()
+@@ -1315,7 +1334,7 @@ class Worker(WorkerBase):
          self._weight_update_active = True
+         self._weight_update_is_draft = is_draft
+ 
+-    def update_weights(self, update_info: dict) -> None:
++    def update_weights(self, update_info: dict | list[dict | None]) -> None:
+         """
+         Receive one weight update chunk from the trainer.
+ 
+@@ -1325,7 +1344,9 @@ class Worker(WorkerBase):
+         / start_draft_weight_update call selected.
+ 
+         Args:
+-            update_info: Dictionary containing backend-specific update info
++            update_info: Backend-specific update info, or a list indexed by
++                global worker rank across data parallel replicas. A `None`
++                entry skips that worker.
+         """
+         self._check_weight_transfer_engine()
+         assert self.weight_transfer_engine is not None
+@@ -1337,7 +1358,19 @@ class Worker(WorkerBase):
+ 
+         with set_current_vllm_config(self.vllm_config):
+             try:
+-                self.weight_transfer_engine.update_weights(update_info)
++                if isinstance(update_info, list):
++                    parallel_config = self.vllm_config.parallel_config
++                    worker_rank = (
++                        parallel_config.data_parallel_rank
++                        * parallel_config.world_size
++                        + self.rank
++                    )
++                    local_update_info = update_info[worker_rank]
++                else:
++                    local_update_info = update_info
++                if local_update_info is None:
++                    return
++                self.weight_transfer_engine.update_weights(local_update_info)
+             except BaseException:
+                 self._weight_update_active = False
+                 self.weight_transfer_engine.reset_weight_update_target()
