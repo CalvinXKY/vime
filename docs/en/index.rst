@@ -74,6 +74,7 @@ Start by Use Case
 
    _examples_synced/fully_async/README.md
    _examples_synced/multi_agent/README.md
+   _examples_synced/coding_agent_rl/README.md
 
 .. toctree::
    :maxdepth: 1

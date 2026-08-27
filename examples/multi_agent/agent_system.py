@@ -50,7 +50,6 @@ async def generate_response(args, prompt, key):
             tokens=new_response_tokens,
             log_probs=new_response_log_probs,
             trainable=True,
-            meta_info=output["meta_info"],
         )
         assert len(sample.rollout_log_probs) == sample.response_length, (
             f"rollout logprob length mismatch: {len(sample.rollout_log_probs)} logprobs "

@@ -54,6 +54,10 @@ segments = await adapter.finish_session(session_id)
 
 多轮 agent 应使用稳定的 `session_id`。adapter 会把它作为 `X-SMG-Routing-Key` 传给 vLLM，让同一个 session 尽量落到同一个 worker，复用 prefix cache。
 
+## 沙盒后端
+
+Coding-agent 示例内置面向 E2B 兼容服务的 `vime.agent.sandbox.E2BSandbox`。其余 agent 生命周期只依赖 provider-neutral 的 `vime.agent.sandbox.Sandbox` 协议，因此 Docker、Modal 或本地虚拟机后端可以实现同一协议，而无需修改 rollout 逻辑。参见[移植到新的沙盒后端](../_examples_synced/coding_agent_rl/README.md#porting-to-a-new-sandbox-backend)。
+
 ## Agent Serving 与性能配置
 
 agentic rollout 往往比普通单轮 generation 更依赖 serving 配置：上下文更长、多轮请求更多、请求时长分布更重尾，并且可能同时需要 actor、reference、reward 或工具侧模型。

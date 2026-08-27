@@ -232,6 +232,22 @@ def _build_inference_sampling_params(sampling_params: dict[str, Any]) -> dict[st
     return sp
 
 
+def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[list[int], list[float]]:
+    """Extract aligned token ids and log probabilities from a vLLM choice."""
+    token_ids = choice.get("token_ids")
+    if not isinstance(token_ids, list) or not all(isinstance(token_id, int) for token_id in token_ids):
+        return [], []
+
+    logprobs = choice.get("logprobs")
+    content = logprobs.get("content") if isinstance(logprobs, dict) else []
+    content = content or []
+    log_probs = [
+        float(content[index].get("logprob", 0.0)) if index < len(content) and isinstance(content[index], dict) else 0.0
+        for index in range(len(token_ids))
+    ]
+    return token_ids, log_probs
+
+
 def _mm_render_response_to_generate_body(render_data: Any, model: str) -> dict[str, Any]:
     """Turn ``/v1/chat/completions/render`` JSON into a ``/inference/v1/generate`` request body."""
     if isinstance(render_data, dict) and isinstance(render_data.get("token_ids"), list):
@@ -395,16 +411,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     choice = output["choices"][0]
 
     # Parse token_ids and logprobs from vLLM response
-    new_response_tokens = choice.get("token_ids") or []
-    new_response_log_probs: list[float] = []
-    lp = choice.get("logprobs")
-    if isinstance(lp, dict):
-        content_items = lp.get("content") or []
-        new_response_log_probs = [
-            float(item.get("logprob", 0.0)) if isinstance(item, dict) else 0.0 for item in content_items
-        ]
-    if not new_response_log_probs:
-        new_response_log_probs = [0.0] * len(new_response_tokens)
+    new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
 
     # Decode text from token_ids
     skip_sp = sampling_params.get("skip_special_tokens")

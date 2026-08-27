@@ -15,7 +15,5 @@ These examples provide concrete examples to leverage vime in your own RL workflo
 - **[on_policy_distillation](./on_policy_distillation)**: On-policy distillation (OPD) with an external vLLM teacher or a Megatron-loaded teacher.
 - **[delta_weight_sync](./delta_weight_sync)**: Non-colocated weight sync that ships only the changed bytes over a shared filesystem (training/inference disaggregation), reloading via the vanilla `update_weights_from_disk` path.
 - **[reproducibility](./reproducibility)**: Guides on achieving bitwise experiment reproduction using deterministic modes.
-- **[retool](./retool)**: Demonstrates the retool functionality for tool-enabled language model generation.
-- **[search-r1](./search-r1)**: A minimal reproduction of Search-R1, featuring multi-turn conversation and tool-calling.
 - **[tau-bench](./tau-bench)**: Multi-turn tool-use agent training in tau-bench environments.
 - **[train_infer_mismatch_helper](./train_infer_mismatch_helper)**: Algorithmic methods for rollout correction (e.g., TIS, MIS).

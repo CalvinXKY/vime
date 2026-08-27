@@ -74,6 +74,7 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
 
    _examples_synced/fully_async/README.md
    _examples_synced/multi_agent/README.md
+   _examples_synced/coding_agent_rl/README.md
 
 .. toctree::
    :maxdepth: 1

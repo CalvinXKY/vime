@@ -5,11 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from vime.rollout.vllm_rollout import (
-    _align_engine_tokens_and_logprobs,
-    _build_inference_sampling_params,
-    _inference_generate_tokens_and_logprobs,
-)
+from vime.rollout.vllm_rollout import _build_inference_sampling_params, _inference_generate_tokens_and_logprobs
 from vime.utils.http_utils import post
 
 
@@ -66,7 +62,6 @@ class MemAgentRolloutClient:
         )
 
         token_ids, log_probs = _inference_generate_tokens_and_logprobs(choice)
-        token_ids, log_probs = _align_engine_tokens_and_logprobs(token_ids, log_probs)
 
         fr = choice.get("finish_reason") or "stop"
         if isinstance(fr, dict):

@@ -54,6 +54,10 @@ segments = await adapter.finish_session(session_id)
 
 For multi-turn agents, use a stable `session_id`. The adapters pass it as `X-SMG-Routing-Key` so vLLM can route one session to the same worker and reuse prefix cache.
 
+## Sandbox Backends
+
+The coding-agent example ships `vime.agent.sandbox.E2BSandbox` for E2B-compatible services. The rest of the agent lifecycle depends only on the provider-neutral `vime.agent.sandbox.Sandbox` protocol, so Docker, Modal, or local VM backends can implement the same contract without changing rollout logic. See [Porting to a New Sandbox Backend](../_examples_synced/coding_agent_rl/README.md#porting-to-a-new-sandbox-backend).
+
 ## Agent Serving And Performance
 
 Agentic rollouts tend to depend more heavily on serving configuration than ordinary single-turn generation: contexts are longer, requests are multi-turn, latency has a heavier tail, and the workflow may need actor, reference, reward, or tool-side models at the same time.

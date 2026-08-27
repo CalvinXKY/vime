@@ -32,6 +32,7 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
   - [目录](#目录)
   - [架构总览](#架构总览)
   - [快速开始](#快速开始)
+    - [Agentic RL 示例](#agentic-rl-示例)
   - [参数说明](#参数说明)
   - [开发指南](#开发指南)
   - [slime doc](#slime-doc)
@@ -46,8 +47,8 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
 **模块说明**：
 
 - **training (Megatron)**：负责主训练流程，从 Data Buffer 读取数据，训练完后将参数同步至 rollout 模块；
-- **rollout (vLLM + router)**：启动 vLLM 推理引擎并路由生成请求，产出新数据（含 reward/verifier），存储至 Data Buffer；
-- **data buffer**：桥梁模块，管理 prompt 初始化、自定义数据与 rollout 生成方法。
+- **rollout (vLLM + router)**：启动 vLLM 推理引擎并路由生成请求；自定义生成函数可以在其上封装多轮循环、工具调用、环境/沙盒交互和基于 verifier 的奖励；
+- **data buffer**：桥梁模块，管理 prompt 初始化、自定义数据与 rollout 生成方法，包括通过同一接口产出样本的 agent 工作流。
 
 ## 快速开始
 
@@ -56,6 +57,16 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
 - [快速开始指南](./docs/zh/get_started/quick_start.md)
 
 我们还提供了一些未在快速开始中覆盖的使用示例，请查看 [examples](examples/)。
+
+### Agentic RL 示例
+
+Agent 工作负载通过 Vime 的定制接口接入标准 rollout / Data Buffer 循环，并不是独立框架：
+
+- [`examples/multi_agent`](examples/multi_agent/README.md)：通过 `--custom-generate-function-path` 实现多 agent 生成；
+- [`examples/fully_async`](examples/fully_async/README.md)：面向长尾 agent 生成的全异步 rollout；
+- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md)：使用 Claude Code 或 Codex、沙盒工具、测试奖励和 token 精确轨迹片段的端到端 coding-agent RL；
+
+请参阅 [Agentic RL 训练路线图](docs/zh/get_started/agent.md)和[定制化指南](docs/zh/get_started/customization.md)。Coding-agent 示例内置 E2B 兼容后端；共享的 `vime.agent.sandbox.Sandbox` 协议也可以由 Docker、Modal 或本地虚拟机实现。
 
 ## 参数说明
 
