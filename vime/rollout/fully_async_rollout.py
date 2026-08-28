@@ -82,13 +82,7 @@ class AsyncRolloutWorker:
         self.data_buffer = data_buffer
         self.concurrency = concurrency
         self.running = True
-        # Unbounded on purpose: put() runs inside the event-loop thread (task
-        # done-callback), so a bounded queue that fills up would block the loop
-        # and freeze every in-flight generation. Backpressure lives in _loop()
-        # instead, which stops topping up while a full pool of completed groups
-        # is already waiting to be consumed.
-        self.output_queue: queue.Queue[tuple[int, list[Sample]]] = queue.Queue()
-        self.poll_interval = 1.0
+        self.output_queue: queue.Queue[tuple[int, list[Sample]]] = queue.Queue(maxsize=1000)
         self.worker_thread: threading.Thread | None = None
         self.state = GenerateState(args)
 
@@ -104,16 +98,9 @@ class AsyncRolloutWorker:
         if self.worker_thread and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=5)
 
-    def get_completed_groups(self, limit: int | None = None) -> list[tuple[int, list[Sample]]]:
-        """Pop up to ``limit`` completed groups (all of them when ``None``).
-
-        Callers that only need a fixed number of groups must pass ``limit`` —
-        anything popped beyond it would otherwise have to be thrown away, and
-        these groups are fully generated and reward-scored, with their prompts
-        already consumed from ``data_buffer``.
-        """
+    def get_completed_groups(self) -> list[tuple[int, list[Sample]]]:
         completed: list[tuple[int, list[Sample]]] = []
-        while limit is None or len(completed) < limit:
+        while True:
             try:
                 completed.append(self.output_queue.get_nowait())
             except queue.Empty:
@@ -145,12 +132,8 @@ class AsyncRolloutWorker:
                             logger.warning("fully-async task crashed: %r", e)
                     active_tasks -= done
 
-                # Top up. The qsize gate is the queue's backpressure: once a
-                # full pool of completed groups is waiting, stop pulling new
-                # prompts until the training side drains some.
-                while (
-                    len(active_tasks) < max_concurrent and self.output_queue.qsize() < max_concurrent and self.running
-                ):
+                # Top up.
+                while len(active_tasks) < max_concurrent and self.running:
                     groups = self.data_buffer.get_samples(1)
                     if not groups:
                         break
@@ -168,10 +151,10 @@ class AsyncRolloutWorker:
                         task.add_done_callback(self._make_done_cb(gid))
                         active_tasks.add(task)
 
-                await asyncio.sleep(self.poll_interval)
+                await asyncio.sleep(1)
             except Exception as e:  # noqa: BLE001
                 logger.exception("fully-async loop iteration error: %s", e)
-                await asyncio.sleep(self.poll_interval)
+                await asyncio.sleep(1)
 
         if active_tasks:
             logger.info(
@@ -226,10 +209,9 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
     LOG_EVERY = 30.0
 
     while len(collected) < target:
-        # Pull only what this rollout still needs; the surplus stays queued for
-        # the next rollout (that is the "queue stays warm" contract).
+        # Pull whatever's done.
         drained = 0
-        for gid, group in worker.get_completed_groups(limit=target - len(collected)):
+        for gid, group in worker.get_completed_groups():
             collected[gid] = group
             drained += 1
 
@@ -256,7 +238,7 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
                 return int(idx)
         return 0
 
-    out = sorted(collected.values(), key=_key)
+    out = sorted(collected.values(), key=_key)[:target]
     logger.info(
         "fully-async rollout %d: done in %.1fs, queue_left=%d",
         rollout_id,

@@ -8,7 +8,7 @@ from .tensorboard_utils import _TensorboardAdapter
 _LOGGER_CONFIGURED = False
 
 
-# ref: VLLM
+# ref: SGLang
 def configure_logger(prefix: str = ""):
     global _LOGGER_CONFIGURED
     if _LOGGER_CONFIGURED:
