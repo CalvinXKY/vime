@@ -211,11 +211,6 @@ def make_vime_validate_args(**overrides):
         balance_data=False,
         eps_clip_high=None,
         eps_clip=0.2,
-        soft_overlong_cache=None,
-        calculate_per_token_loss=False,
-        dynamic_sampling_filter_path=None,
-        custom_reward_post_process_path=None,
-        rollout_max_response_len=1024,
         eval_reward_key=None,
         reward_key="reward",
         dump_details=None,
@@ -343,67 +338,6 @@ def test_vime_validate_args_preserves_zero_rollout_gpus_without_colocate(monkeyp
     assert args.actor_num_nodes == 1
     assert args.offload_train is False
     assert args.offload_rollout is False
-
-
-@pytest.mark.unit
-def test_vime_validate_args_dapo_recipe_defaults(monkeypatch):
-    module = load_vime_arguments_module(monkeypatch)
-    args = make_vime_validate_args(
-        advantage_estimator="dapo",
-        n_samples_per_prompt=8,
-        rollout_batch_size=32,
-        rollout_max_response_len=1024,
-        over_sampling_batch_size=64,
-    )
-
-    module.vime_validate_args(args)
-
-    assert args.eps_clip_high == 0.28
-    assert args.calculate_per_token_loss is True
-    assert (
-        args.dynamic_sampling_filter_path
-        == "vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
-    )
-    assert args.soft_overlong_cache == 256
-
-
-@pytest.mark.unit
-def test_vime_validate_args_dapo_requires_rollout_max_response_len(monkeypatch):
-    module = load_vime_arguments_module(monkeypatch)
-    args = make_vime_validate_args(
-        advantage_estimator="dapo",
-        rollout_max_response_len=None,
-        soft_overlong_cache=None,
-    )
-
-    with pytest.raises(ValueError, match="rollout-max-response-len"):
-        module.vime_validate_args(args)
-
-
-@pytest.mark.unit
-def test_vime_validate_args_soft_overlong_requires_rollout_max_response_len(monkeypatch):
-    module = load_vime_arguments_module(monkeypatch)
-    args = make_vime_validate_args(
-        advantage_estimator="grpo",
-        soft_overlong_cache=256,
-        rollout_max_response_len=None,
-    )
-
-    with pytest.raises(ValueError, match="rollout-max-response-len"):
-        module.vime_validate_args(args)
-
-
-@pytest.mark.unit
-def test_vime_validate_args_soft_overlong_cache_exceeds_max_response_len(monkeypatch):
-    module = load_vime_arguments_module(monkeypatch)
-    args = make_vime_validate_args(
-        advantage_estimator="grpo",
-        soft_overlong_cache=2000,
-        rollout_max_response_len=1024,
-    )
-
-    with pytest.raises(ValueError, match="must be <="):
-        module.vime_validate_args(args)
 
 
 @pytest.mark.unit

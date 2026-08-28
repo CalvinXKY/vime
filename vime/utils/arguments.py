@@ -912,13 +912,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 "--soft-overlong-cache",
                 type=int,
                 default=None,
-                help=(
-                    "Soft Overlong Punishment cache length L_cache from DAPO. "
-                    "When set to a positive value, responses longer than "
-                    "(rollout_max_response_len - soft_overlong_cache) receive a linear length penalty "
-                    "before group reward normalization. Set to 0 to disable. "
-                    "With --advantage-estimator dapo, defaults to rollout_max_response_len // 4."
-                ),
+                help="DAPO Soft Overlong penalty window; 0 disables it.",
             )
             parser.add_argument(
                 "--eps-clip-c",
@@ -1903,56 +1897,27 @@ def vime_validate_args(args):
         args.balance_data = True
 
     if args.advantage_estimator == "dapo":
-        # DAPO defaults: Clip-Higher + token-level loss + dynamic sampling + Soft Overlong.
+        args.advantage_estimator = "grpo"
         if args.eps_clip_high is None:
             args.eps_clip_high = 0.28
-            logger.info("DAPO: setting --eps-clip-high to 0.28 (Clip-Higher).")
-        if not args.calculate_per_token_loss:
-            args.calculate_per_token_loss = True
-            logger.info("DAPO: --calculate-per-token-loss is mandatory for DAPO and has been enabled.")
+        args.calculate_per_token_loss = True
         if args.dynamic_sampling_filter_path is None:
             args.dynamic_sampling_filter_path = (
                 "vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
             )
-            logger.info(
-                "DAPO: enabling dynamic sampling filter "
-                "vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std."
-            )
         if args.soft_overlong_cache is None:
             if args.rollout_max_response_len is None:
-                raise ValueError(
-                    "DAPO Soft Overlong requires --rollout-max-response-len to be set "
-                    "(or pass --soft-overlong-cache 0 to disable Soft Overlong)."
-                )
+                raise ValueError("DAPO requires --rollout-max-response-len or --soft-overlong-cache 0.")
             args.soft_overlong_cache = max(1, int(args.rollout_max_response_len) // 4)
-            logger.info(
-                "DAPO: enabling Soft Overlong with --soft-overlong-cache %s.",
-                args.soft_overlong_cache,
-            )
-        if args.custom_reward_post_process_path is not None and args.soft_overlong_cache:
-            logger.warning(
-                "DAPO Soft Overlong (--soft-overlong-cache) is skipped when "
-                "--custom-reward-post-process-path is set; apply length penalty in the custom function if needed."
-            )
 
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
 
-    if args.soft_overlong_cache is not None:
-        if args.soft_overlong_cache < 0:
-            raise ValueError(f"--soft-overlong-cache must be >= 0, got {args.soft_overlong_cache}.")
-        if args.soft_overlong_cache > 0 and args.rollout_max_response_len is None:
-            raise ValueError("--rollout-max-response-len must be set when --soft-overlong-cache is enabled.")
-        if (
-            args.soft_overlong_cache > 0
-            and args.rollout_max_response_len is not None
-            and args.soft_overlong_cache > args.rollout_max_response_len
-        ):
-            raise ValueError(
-                f"--soft-overlong-cache ({args.soft_overlong_cache}) must be <= "
-                f"--rollout-max-response-len ({args.rollout_max_response_len}). "
-                "L_cache should not exceed the maximum response length."
-            )
+    soft_overlong_cache = getattr(args, "soft_overlong_cache", None)
+    if soft_overlong_cache and (
+        args.rollout_max_response_len is None or not 0 < soft_overlong_cache <= args.rollout_max_response_len
+    ):
+        raise ValueError("--soft-overlong-cache must be between 0 and --rollout-max-response-len.")
 
     if args.advantage_estimator == "cispo" and args.eps_clip < 1.0:
         logger.warning(
@@ -2080,18 +2045,6 @@ def vime_validate_args(args):
         f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
         f"rollout_batch_size {args.rollout_batch_size}"
     )
-
-    if (
-        args.advantage_estimator == "dapo"
-        and args.dynamic_sampling_filter_path is not None
-        and args.over_sampling_batch_size <= args.rollout_batch_size
-    ):
-        logger.warning(
-            "DAPO dynamic sampling is more effective when "
-            "--over-sampling-batch-size > --rollout-batch-size "
-            f"(got over_sampling_batch_size={args.over_sampling_batch_size}, "
-            f"rollout_batch_size={args.rollout_batch_size})."
-        )
 
     if args.num_epoch is not None:
         if args.num_rollout is not None:

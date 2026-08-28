@@ -229,35 +229,13 @@ GRPO 的主要特点：
 
 #### DAPO 算法
 
-DAPO（Decoupled Clip and Dynamic sAmpling Policy Optimization，https://arxiv.org/abs/2503.14476）通过组内相对 advantage、Clip-Higher、token-level loss、dynamic sampling 与 Soft Overlong 进行策略优化。选择 `dapo` 后，这些机制会按默认配置启用。
-
-使用 DAPO 时，需要设置：
+DAPO（Decoupled Clip and Dynamic sAmpling Policy Optimization，https://arxiv.org/abs/2503.14476）作为现有 GRPO 实现的预设提供。使用：
 
 ```bash
 --advantage-estimator dapo
---n-samples-per-prompt 8
---rollout-batch-size 32
---over-sampling-batch-size 64
 ```
 
-选择 `dapo` 后，若未显式覆盖，会自动设置：
-
-- `--eps-clip-high 0.28`（与默认 `--eps-clip 0.2` 构成 Clip-Higher）；
-- `--calculate-per-token-loss`（DAPO 要求 token-level loss，选择 `dapo` 时会强制开启）；
-- `--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`；
-- `--soft-overlong-cache` 为 `rollout_max_response_len // 4`。
-
-相关参数：
-
-- `--eps-clip` / `--eps-clip-high`：非对称 clip 上下界；
-- `--calculate-per-token-loss`：按 token 而非按 sample 归约 policy loss；选择 `dapo` 时为强制项；
-- `--over-sampling-batch-size`：建议大于 `--rollout-batch-size`，配合 dynamic sampling 过采样；
-- `--dynamic-sampling-filter-path`：过滤组内 reward std≈0（全对/全错）的 prompt 组；
-- `--soft-overlong-cache`：Soft Overlong 的 L_cache；设为 `0` 可关闭。长度惩罚在 group reward 归一化之前叠加到 reward 上，因此无论是否启用 rewards normalization，Soft Overlong 都会生效；
-- `--partial-rollout`：可选，动态采样 abort 后的续写加速；
-- `--rm-type dapo`：仅表示 DAPO 论文配套的数学答案打分器，不等于完整 DAPO 配方。
-
-注意：若同时设置 `--custom-reward-post-process-path`，内置 Soft Overlong 不会生效，需要在自定义函数中自行实现长度惩罚。
+该预设使用 GRPO，并启用 Clip-Higher（`--eps-clip-high 0.28`）、token-level loss、默认 dynamic-sampling filter，以及长度为 `--rollout-max-response-len` 四分之一的 Soft Overlong 区间。设置 `--soft-overlong-cache 0` 可关闭长度惩罚；自定义 reward post-process 会替代内置 reward shaping。
 
 #### PPO 算法
 
