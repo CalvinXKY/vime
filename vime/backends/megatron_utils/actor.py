@@ -13,7 +13,6 @@ from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
 
 from vime.ray.train_actor import TrainRayActor
-from vime.utils import train_dump_utils
 from vime.utils.data import process_rollout_data
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.logging_utils import init_tracking
@@ -31,6 +30,7 @@ from vime.utils.types import RolloutBatch
 
 from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
+from . import train_dump_utils
 from .checkpoint import load_checkpoint
 from .cp_utils import prepare_routed_experts_for_routing_replay, slice_log_prob_with_cp
 from .data import DataIterator, get_data_iterator, log_perf_data, log_rollout_data

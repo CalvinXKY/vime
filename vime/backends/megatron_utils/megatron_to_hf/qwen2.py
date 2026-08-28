@@ -68,10 +68,4 @@ def convert_qwen2_to_hf(args, name, param):
         elif rest == "self_attention.k_layernorm.weight":
             return [(f"model.layers.{layer_idx}.self_attn.k_norm.weight", param)]
 
-        # Local (non-TE) layernorm parameter names
-        elif rest == "input_layernorm.weight":
-            return [(f"model.layers.{layer_idx}.input_layernorm.weight", param)]
-        elif rest == "pre_mlp_layernorm.weight":
-            return [(f"model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
-
     raise ValueError(f"Unknown parameter name: {name}")

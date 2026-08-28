@@ -17,8 +17,39 @@ from megatron.core.transformer.spec_utils import import_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.arguments import core_transformer_config_from_args
 
-from vime.utils.megatron_bridge_utils import patch_auto_bridge_hf_config
 from vime.utils.misc import load_function
+
+_INDEXER_DIRECT_SUBMODULE_NAMES = frozenset(
+    {
+        "wq_b",
+        "wk",
+        "k_norm",
+        "weights_proj",
+        "index_kpool_compress_ape",
+        "index_kpool_compress_gate",
+    }
+)
+
+
+def _is_indexer_parameter(name: str) -> bool:
+    """Return whether *name* belongs to a DSA indexer.
+
+    The GLM plugin exposes indexer projections directly under
+    ``self_attention``. Megatron's upstream DSA implementation instead nests
+    them under ``self_attention.core_attention.indexer``. Keep the ownership
+    check structural so similarly named non-indexer projections stay trainable.
+    """
+
+    parts = name.split(".")
+    for index, part in enumerate(parts):
+        if part != "self_attention" or index + 1 >= len(parts):
+            continue
+        attention_parts = parts[index + 1 :]
+        if attention_parts[0] in _INDEXER_DIRECT_SUBMODULE_NAMES:
+            return True
+        if "indexer" in attention_parts[:-1]:
+            return True
+    return False
 
 
 # Adapt from https://github.com/volcengine/verl/blob/c3b20575d2bc815fcccd84bddb4c0401fc4b632b/verl/models/llama/megatron/layers/parallel_linear.py#L82
@@ -58,80 +89,6 @@ class LinearForLastLayer(torch.nn.Linear):
         return logits, None
 
 
-def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
-    """Copy the runtime config from args onto a bridge-built provider.
-
-    Bridge mode builds the model from the HF checkpoint and skips
-    core_transformer_config_from_args, so command-line args never reach the
-    provider. We copy only some fields, not all of args: the provider already
-    holds the right values from the HF checkpoint, while args only has default
-    values for model shape, dtype, and fields the provider set on purpose.
-    Copying those would quietly break the model -- the bridge only logs a
-    warning and keeps going, it does not fail. So we copy just the training,
-    parallelism, memory, and numerics settings that really come from args. Put
-    new training flags here, not spread across the code.
-
-    Ported from miles' backends/megatron_utils/model_provider.py to keep the
-    two bridge integrations in sync (see vllm-project/vime#337, which fixed
-    only the recompute_* fields below).
-    """
-    # parallelism / sharding
-    provider.tensor_model_parallel_size = args.tensor_model_parallel_size
-    provider.pipeline_model_parallel_size = args.pipeline_model_parallel_size
-    provider.expert_model_parallel_size = args.expert_model_parallel_size
-    provider.expert_tensor_parallel_size = args.expert_tensor_parallel_size
-    provider.sequence_parallel = args.sequence_parallel
-    provider.context_parallel_size = args.context_parallel_size
-    provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion
-
-    # loss / sequence handling
-    provider.calculate_per_token_loss = args.calculate_per_token_loss  # CP>1 VL models assert this
-    provider.variable_seq_lengths = args.variable_seq_lengths
-
-    # numerics (training infra, not model-defining)
-    provider.attention_softmax_in_fp32 = args.attention_softmax_in_fp32
-    provider.fp32_residual_connection = args.fp32_residual_connection
-    provider.deterministic_mode = args.deterministic_mode
-
-    # activation recompute (silently dropped before -> no checkpointing -> OOM at long context)
-    provider.recompute_granularity = args.recompute_granularity
-    provider.recompute_method = args.recompute_method
-    provider.recompute_num_layers = args.recompute_num_layers
-    provider.recompute_modules = args.recompute_modules
-
-    # activation / memory offload
-    provider.cpu_offloading_num_layers = args.cpu_offloading_num_layers
-    provider.distribute_saved_activations = args.distribute_saved_activations
-    # cpu_offloading is derived, set only when cpu_offloading_num_layers>0; guard its presence.
-    if hasattr(args, "cpu_offloading"):
-        provider.cpu_offloading = args.cpu_offloading
-
-    # communication overlap
-    provider.tp_comm_overlap = args.tp_comm_overlap
-
-    # fp8
-    provider.fp8 = args.fp8
-    provider.fp8_recipe = args.fp8_recipe
-
-    # attention kernel selection
-    provider.attention_backend = args.attention_backend
-
-    # MoE token dispatcher (same-name, always present)
-    provider.moe_token_dispatcher_type = args.moe_token_dispatcher_type
-
-    # arg name != provider field; arg default None, so propagate only when the user set it
-    if getattr(args, "decoder_first_pipeline_num_layers", None) is not None:
-        provider.num_layers_in_first_pipeline_stage = args.decoder_first_pipeline_num_layers
-    if getattr(args, "decoder_last_pipeline_num_layers", None) is not None:
-        provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
-
-    # MoE training knobs: override only when explicitly set, else keep the provider's value
-    if getattr(args, "moe_router_bias_update_rate", None) is not None:
-        provider.moe_router_bias_update_rate = args.moe_router_bias_update_rate
-    if getattr(args, "moe_aux_loss_coeff", None) is not None:
-        provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
-
-
 def _get_model_provider_func(
     args: argparse.Namespace,
     role: Literal["actor", "critic"] = "actor",
@@ -158,42 +115,6 @@ def _get_model_provider_func(
 
         return wrapped_model_provider
 
-    if args.megatron_to_hf_mode == "bridge":
-        from megatron.bridge import AutoBridge
-
-        import vime_plugins.megatron_bridge  # noqa: F401  # register custom bridges
-
-        bridge = patch_auto_bridge_hf_config(AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True))
-        provider = bridge.to_megatron_provider(load_weights=False)
-        _apply_bridge_runtime_config(provider, args)
-        provider.finalize()
-
-        def wrapped_bridge_provider(
-            pre_process: bool = True,
-            post_process: bool = True,
-            vp_stage: int | None = None,
-            config: TransformerConfig | None = None,
-            pg_collection=None,
-        ) -> GPTModel:
-            assert (
-                config is None
-            ), "vime builds the bridge provider's config from args, so it expects config to be None"
-            # vime-patch (ported from miles): PP>1 paths in some megatron.bridge
-            # providers (e.g. mamba_provider, needed for hybrid Mamba/attention
-            # models like NemotronH) read self._pg_collection.pp during provide();
-            # without forwarding the caller's pg_collection here, those code
-            # paths hit AttributeError.
-            if pg_collection is not None:
-                provider._pg_collection = pg_collection
-            model = provider.provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
-            if post_process and role == "critic":
-                model.output_layer = LinearForLastLayer(
-                    input_size=model.config.hidden_size, output_size=1, config=model.config
-                )
-            return model
-
-        return wrapped_bridge_provider
-
     def model_provider(pre_process: bool = True, post_process: bool = True, vp_stage: int | None = None) -> GPTModel:
         """Builds the model.
 
@@ -216,6 +137,10 @@ def _get_model_provider_func(
 
         # Experimental loading arguments from yaml
         config: TransformerConfig = core_transformer_config_from_args(args)
+        # Older GLM Megatron forks consumed this flag from TransformerConfig.
+        # Preserve that contract for custom specs, while freeze_model_params()
+        # below provides the concrete implementation on current Megatron.
+        config.freeze_indexer = getattr(args, "freeze_indexer", False)
 
         if args.spec is not None:
             transformer_layer_spec = import_module(args.spec)
@@ -250,6 +175,7 @@ def _get_model_provider_func(
                         qk_layernorm=args.qk_layernorm,
                         multi_latent_attention=args.multi_latent_attention,
                         moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
+                        normalization=args.normalization,
                     )
                 else:
                     transformer_layer_spec = get_gpt_layer_local_spec(
@@ -415,3 +341,22 @@ def freeze_model_params(model: GPTModel, args: argparse.Namespace):
                 if re.search(pattern, name):
                     param.requires_grad = False
                     break
+
+    if getattr(args, "freeze_indexer", False):
+        frozen_indexer_params = []
+        has_self_attention_params = False
+        for name, param in model.named_parameters():
+            has_self_attention_params |= "self_attention" in name.split(".")
+            if _is_indexer_parameter(name):
+                param.requires_grad = False
+                frozen_indexer_params.append(name)
+
+        if has_self_attention_params and not frozen_indexer_params:
+            raise RuntimeError(
+                "--freeze-indexer was requested, but this model chunk has self-attention "
+                "parameters and no recognized DSA indexer parameters."
+            )
+
+        # Some pipeline stages may legitimately own no indexer weights, so an
+        # empty local tuple is not itself an error.
+        model._vime_frozen_indexer_param_names = tuple(frozen_indexer_params)
