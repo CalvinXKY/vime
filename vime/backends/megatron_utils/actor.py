@@ -3,6 +3,7 @@ import os
 from argparse import Namespace
 from contextlib import contextmanager, nullcontext
 from datetime import timedelta
+from itertools import chain
 from pathlib import Path
 
 import ray
@@ -140,10 +141,13 @@ class MegatronTrainRayActor(TrainRayActor):
             return start_rollout_id
 
         self.weights_backuper = TensorBackuper.create(
-            source_getter=lambda: named_params_and_buffers(
-                self.args,
-                self.model,
-                convert_to_global_name=args.megatron_to_hf_mode == "raw",
+            source_getter=lambda: chain(
+                named_params_and_buffers(
+                    self.args,
+                    self.model,
+                    convert_to_global_name=args.megatron_to_hf_mode == "raw",
+                ),
+                self._iter_dspark_draft_params(),
             ),
             single_tag=None,
         )
@@ -238,13 +242,8 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weight_updater.disconnect_rollout_engines()
         destroy_process_groups()
 
-        # DSpark: save draft model weights to CPU before torch_memory_saver.pause().
-        # named_params_and_buffers explicitly skips draft_model params, so
-        # weights_backuper does NOT save/restore them. pause() frees all GPU
-        # memory (including draft backbone), and neither resume() nor
-        # _switch_model("actor") restores draft weights. Without this save,
-        # draft backbone weights become zero after the pause/resume cycle.
-        self._save_dspark_draft_to_cpu()
+        # DSpark: draft model params are now included in weights_backuper,
+        # so they are automatically saved before pause() and restored after resume().
 
         # Defragment GPU memory before torch_memory_saver.pause().
         # After multiple cache/restore cycles, GPU memory becomes fragmented
@@ -293,93 +292,31 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.role == "actor":
             self._switch_model("actor")
 
-        # DSpark: restore draft model weights from CPU after resume().
-        # _switch_model("actor") restores policy weights via weights_backuper,
-        # but draft_model params are explicitly skipped by named_params_and_buffers.
-        # Without this restore, draft backbone weights remain zero after pause/resume.
-        self._restore_dspark_draft_from_cpu()
+        # DSpark: draft model params are restored by _switch_model("actor")
+        # via weights_backuper, which now includes draft_model params.
 
         print_memory("after wake_up model")
 
-    @torch.no_grad()
-    def _save_dspark_draft_to_cpu(self) -> None:
-        """Save DSpark draft model weights to CPU before torch_memory_saver.pause().
+    def _iter_dspark_draft_params(self):
+        """Yield DSpark draft model params for weights_backuper.
 
-        named_params_and_buffers explicitly skips draft_model params, so
-        weights_backuper does NOT save them. pause() frees all GPU memory
-        (including draft backbone), and neither resume() nor _switch_model
-        restores draft weights. This method bridges the gap by saving draft
-        weights to a CPU buffer that _restore_dspark_draft_from_cpu() loads
-        after resume().
+        This allows weights_backuper to automatically save/restore draft model
+        params during pause()/resume() cycles, eliminating the need for manual
+        _save_dspark_draft_to_cpu() / _restore_dspark_draft_from_cpu().
         """
         if not (
             getattr(self.args, "dspark_enabled", False)
             and (self.args.vllm_speculative_config or {}).get("method") == "dspark"
         ):
             return
-
         from vime.backends.megatron_utils.dspark.export import get_dspark_model_from_policy_chunk
 
-        draft_model = get_dspark_model_from_policy_chunk(self.model)
-        if draft_model is None:
-            return
-
-        torch.cuda.synchronize()
-        cpu_backup = []
-        for name, param in draft_model.named_parameters():
-            cpu_t = param.data.detach().to("cpu", copy=True)
-            cpu_backup.append((name, cpu_t))
-
-        self._dspark_draft_cpu_backup = cpu_backup
-        total_bytes = sum(t.numel() * t.element_size() for _, t in cpu_backup)
-        logger.info(
-            "[DSpark] Saved draft weights to CPU: %d tensors, %.1f MB",
-            len(cpu_backup),
-            total_bytes / 1024 / 1024,
-        )
-
-    @torch.no_grad()
-    def _restore_dspark_draft_from_cpu(self) -> None:
-        """Restore DSpark draft model weights from CPU after torch_memory_saver.resume().
-
-        Counterpart to _save_dspark_draft_to_cpu(). Must be called after
-        resume() and _switch_model("actor"), because _switch_model restores
-        policy weights but skips draft_model params.
-        """
-        cpu_backup = getattr(self, "_dspark_draft_cpu_backup", None)
-        if cpu_backup is None:
-            return
-
-        from vime.backends.megatron_utils.dspark.export import get_dspark_model_from_policy_chunk
-
-        draft_model = get_dspark_model_from_policy_chunk(self.model)
-        if draft_model is None:
-            logger.warning("[DSpark] draft_model not found during restore")
-            self._dspark_draft_cpu_backup = None
-            return
-
-        draft_params = dict(draft_model.named_parameters())
-        restored = 0
-        for name, cpu_t in cpu_backup:
-            if name in draft_params:
-                param = draft_params[name]
-                if param.data.shape == cpu_t.shape:
-                    # Cannot use copy_() because torch_memory_saver.pause() freed
-                    # the underlying GPU storage and resume() does not restore
-                    # draft_model params (named_params_and_buffers skips them).
-                    # Assign a fresh GPU tensor instead.
-                    param.data = cpu_t.to(param.device, dtype=param.dtype).clone()
-                    restored += 1
-                else:
-                    logger.warning(
-                        "[DSpark] Shape mismatch on restore: %s: cpu %s vs gpu %s",
-                        name,
-                        tuple(cpu_t.shape),
-                        tuple(param.data.shape),
-                    )
-
-        self._dspark_draft_cpu_backup = None  # consume the backup
-        logger.info("[DSpark] Restored %d/%d draft weights from CPU", restored, len(cpu_backup))
+        for vp_stage, model_module in enumerate(self.model):
+            draft_model = get_dspark_model_from_policy_chunk([model_module])
+            if draft_model is None:
+                continue
+            for name, param in draft_model.named_parameters():
+                yield f"vp_stages.{vp_stage}.draft_model.{name}", param
 
     def _get_rollout_data(self, rollout_data_ref: Box) -> RolloutBatch:
         # Fetch data through ray on CPU, not sure if this will be performance bottleneck.
@@ -675,9 +612,10 @@ class MegatronTrainRayActor(TrainRayActor):
         self.weights_backuper.backup("actor")
 
         # DSpark: cache draft weights to CPU BEFORE sleep()/offload.
-        # Draft model params are NOT covered by weights_backuper, so they
-        # must be explicitly cached here while the model is still on GPU.
-        # torch_memory_saver.pause() in sleep() will invalidate GPU pointers.
+        # Draft model params are now covered by weights_backuper (via
+        # _iter_dspark_draft_params), but we still need to export them to
+        # HF format for vLLM weight sync. This must be done while the model
+        # is still on GPU, before torch_memory_saver.pause() invalidates pointers.
         if (
             getattr(self.args, "dspark_enabled", False)
             and (self.args.vllm_speculative_config or {}).get("method") == "dspark"
@@ -780,12 +718,16 @@ class MegatronTrainRayActor(TrainRayActor):
         else:
             _tms_ctx = nullcontext()
         with _tms_ctx:
-            # DSpark: restore draft weights from CPU backup.
-            # torch_memory_saver.disable() restores policy weights but NOT
-            # draft_model params (skipped by named_params_and_buffers).
-            # For colocate mode, wake_up() is NOT called in update_weights(),
-            # so draft weights are still zero on GPU without this restore.
-            self._restore_dspark_draft_from_cpu()
+            # DSpark: In colocate mode, disable() does NOT restore GPU memory
+            # from TMS backup. We need to restore draft params (and policy params)
+            # from weights_backuper so cache_dspark_draft_weights() can access them.
+            # In non-colocate mode, wake_up() already called _switch_model("actor").
+            if (
+                getattr(self.args, "dspark_enabled", False)
+                and (self.args.vllm_speculative_config or {}).get("method") == "dspark"
+                and not reconnect_rollout_engines
+            ):
+                self._switch_model("actor")
 
             # DSpark: cache draft weights for weight sync.
             # On the first update_weights() call, _ipc_engine was None when
