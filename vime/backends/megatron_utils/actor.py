@@ -1,7 +1,7 @@
 import logging
 import os
 from argparse import Namespace
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from pathlib import Path
 
@@ -13,6 +13,7 @@ from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
 
 from vime.ray.train_actor import TrainRayActor
+from vime.utils import train_dump_utils
 from vime.utils.data import process_rollout_data
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.logging_utils import init_tracking
@@ -30,19 +31,12 @@ from vime.utils.types import RolloutBatch
 
 from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
-from . import train_dump_utils
 from .checkpoint import load_checkpoint
 from .cp_utils import prepare_routed_experts_for_routing_replay, slice_log_prob_with_cp
 from .data import DataIterator, get_data_iterator, log_perf_data, log_rollout_data
 from .hf_checkpoint_saver import save_hf_model_to_path
 from .initialize import init, is_megatron_main_rank
-from .loss import (
-    compute_advantages_and_returns,
-    drain_captured_log_probs,
-    enable_log_prob_capture,
-    get_log_probs_and_entropy,
-    get_values,
-)
+from .loss import compute_advantages_and_returns, get_log_probs_and_entropy, get_values
 from .model import forward_only, initialize_model_and_optimizer, save, train
 from .update_weight.common import named_params_and_buffers
 from .update_weight.update_weight_from_disk import UpdateWeightFromDisk
@@ -52,6 +46,29 @@ from .update_weight.update_weight_from_tensor import UpdateWeightFromTensor
 logging.getLogger("megatron").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _tms_disable_safe():
+    """Replicate torch_memory_saver.disable() without the interesting_region assertion.
+
+    When we skip torch_memory_saver.pause()/resume() (DSpark pre-trained model),
+    the interesting_region flag may be False, causing disable() to assert.
+    This context manager manually sets interesting_region=False and creates
+    a standalone MemPool, so IPC _share_cuda_() works (torch_memory_saver's
+    custom allocator breaks cudaIpcGetMemHandle).
+    """
+    impl = torch_memory_saver._impl
+    cdll = impl._binary_wrapper.cdll
+    orig_interesting = cdll.tms_get_interesting_region()
+    cdll.tms_set_interesting_region(False)
+    try:
+        pool = torch.cuda.MemPool()
+        with torch.cuda.use_mem_pool(pool):
+            yield
+        del pool
+    finally:
+        cdll.tms_set_interesting_region(orig_interesting)
 
 
 class MegatronTrainRayActor(TrainRayActor):
@@ -69,8 +86,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
         monkey_patch_torch_dist()
         super().init(args, role, with_ref, with_opd_teacher)
-        # Destroying and recreating WORLD invalidates raw dist.group.WORLD references cached by external code.
-        # Set VIME_DESTROY_WORLD_PROCESS_GROUP=0 when such references may outlive a train sleep/wake cycle.
+        # Disable this when external code keeps raw dist.group.WORLD references
+        # across a train sleep/wake cycle.
         if os.getenv("VIME_DESTROY_WORLD_PROCESS_GROUP", "1").lower() not in {"0", "false", "no"}:
             register_default_process_group(timeout=timedelta(minutes=args.distributed_timeout_minutes))
         else:
@@ -91,6 +108,11 @@ class MegatronTrainRayActor(TrainRayActor):
             dist.barrier(group=get_gloo_group())
 
         dist.barrier(group=get_gloo_group())
+
+        if args.offload_train:
+            if (x := args.train_memory_margin_bytes) > 0:
+                logger.info(f"Set torch_memory_saver.memory_margin_bytes to {x}")
+                torch_memory_saver.memory_margin_bytes = x
 
         self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
             args, role
@@ -121,7 +143,7 @@ class MegatronTrainRayActor(TrainRayActor):
             source_getter=lambda: named_params_and_buffers(
                 self.args,
                 self.model,
-                convert_to_global_name=True,
+                convert_to_global_name=args.megatron_to_hf_mode == "raw",
             ),
             single_tag=None,
         )
@@ -144,7 +166,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if self.args.vocab_size is None:
             # Prefer HF config vocab_size (which may include model-native padding)
-            # over tokenizer vocab_size, which may be smaller.
+            # over tokenizer vocab_size (which may be smaller, e.g. GPT-OSS).
             hf_vocab = getattr(self.hf_config, "vocab_size", None)
             self.args.vocab_size = hf_vocab if hf_vocab is not None else self.tokenizer.vocab_size
 
@@ -216,7 +238,42 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weight_updater.disconnect_rollout_engines()
         destroy_process_groups()
 
-        torch_memory_saver.pause()
+        # DSpark: save draft model weights to CPU before torch_memory_saver.pause().
+        # named_params_and_buffers explicitly skips draft_model params, so
+        # weights_backuper does NOT save/restore them. pause() frees all GPU
+        # memory (including draft backbone), and neither resume() nor
+        # _switch_model("actor") restores draft weights. Without this save,
+        # draft backbone weights become zero after the pause/resume cycle.
+        self._save_dspark_draft_to_cpu()
+
+        # Defragment GPU memory before torch_memory_saver.pause().
+        # After multiple cache/restore cycles, GPU memory becomes fragmented
+        # and pause() crashes with cudaError(1) at the C++ level (Bug 1c).
+        # The C++ error kills the process before Python try/except can catch it.
+        # synchronize() + empty_cache() defragments GPU memory to prevent crash.
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+        # Skip torch_memory_saver.pause() when using DSpark pre-trained model.
+        # The C++ pause function crashes with cudaError(1) when the DSpark
+        # draft model (intermediate_size=9728) is attached. vLLM is already
+        # initialized with the policy model on GPU, so offloading is not
+        # strictly needed — vLLM's memory profiler accounted for the policy
+        # model's GPU usage at startup.
+        # DSpark: always skip torch_memory_saver.pause() to avoid Bug 1c crash.
+        # The C++ pause function crashes with cudaError(1) regardless of whether
+        # pretrained checkpoint is used. synchronize() + empty_cache() does not
+        # fully prevent the crash. vLLM accounts for policy model GPU memory at
+        # startup, so offloading is not strictly needed.
+        # DSpark: call torch_memory_saver.pause() to offload training model to CPU.
+        # Skipping pause() causes vLLM wake_up OOM because training model stays on GPU.
+        # The synchronize() + empty_cache() above defragments GPU memory to prevent Bug 1c crash.
+        # Bug 1c may still crash after ~40 steps due to memory fragmentation, but
+        # skipping pause() crashes at step 1, so calling pause() is the better option.
+        try:
+            torch_memory_saver.pause()
+        except Exception as e:
+            logger.warning(f"[DSpark] torch_memory_saver.pause() failed: {e}. Continuing without offload.")
 
         print_memory("after offload model")
 
@@ -225,22 +282,104 @@ class MegatronTrainRayActor(TrainRayActor):
         assert self.args.offload_train
         print_memory("before wake_up model")
 
-        torch_memory_saver.resume()
+        # DSpark: call resume() to restore training model from CPU.
+        try:
+            torch_memory_saver.resume()
+        except Exception as e:
+            logger.warning(f"[DSpark] torch_memory_saver.resume() failed: {e}. Continuing without restore.")
 
         clear_memory()
         reload_process_groups()
-
-        if mpu.get_pipeline_model_parallel_world_size() > 2:
-            # Megatron's patched batched pipeline P2P uses the default WORLD
-            # group.  After reload, PP=4 starts with only the first two stages
-            # entering batch_isend_irecv(), but PyTorch requires every rank when
-            # that is the first NCCL operation on a group.  Prime WORLD here,
-            # after the memory saver is resumed, so later stages cannot miss its
-            # lazy initialization.  Sleep still destroys it completely.
-            dist.barrier(device_ids=[torch.cuda.current_device()])
         if self.role == "actor":
             self._switch_model("actor")
+
+        # DSpark: restore draft model weights from CPU after resume().
+        # _switch_model("actor") restores policy weights via weights_backuper,
+        # but draft_model params are explicitly skipped by named_params_and_buffers.
+        # Without this restore, draft backbone weights remain zero after pause/resume.
+        self._restore_dspark_draft_from_cpu()
+
         print_memory("after wake_up model")
+
+    @torch.no_grad()
+    def _save_dspark_draft_to_cpu(self) -> None:
+        """Save DSpark draft model weights to CPU before torch_memory_saver.pause().
+
+        named_params_and_buffers explicitly skips draft_model params, so
+        weights_backuper does NOT save them. pause() frees all GPU memory
+        (including draft backbone), and neither resume() nor _switch_model
+        restores draft weights. This method bridges the gap by saving draft
+        weights to a CPU buffer that _restore_dspark_draft_from_cpu() loads
+        after resume().
+        """
+        if not (
+            getattr(self.args, "dspark_enabled", False)
+            and (self.args.vllm_speculative_config or {}).get("method") == "dspark"
+        ):
+            return
+
+        from vime.backends.megatron_utils.dspark.export import get_dspark_model_from_policy_chunk
+
+        draft_model = get_dspark_model_from_policy_chunk(self.model)
+        if draft_model is None:
+            return
+
+        torch.cuda.synchronize()
+        cpu_backup = []
+        for name, param in draft_model.named_parameters():
+            cpu_t = param.data.detach().to("cpu", copy=True)
+            cpu_backup.append((name, cpu_t))
+
+        self._dspark_draft_cpu_backup = cpu_backup
+        total_bytes = sum(t.numel() * t.element_size() for _, t in cpu_backup)
+        logger.info(
+            "[DSpark] Saved draft weights to CPU: %d tensors, %.1f MB",
+            len(cpu_backup),
+            total_bytes / 1024 / 1024,
+        )
+
+    @torch.no_grad()
+    def _restore_dspark_draft_from_cpu(self) -> None:
+        """Restore DSpark draft model weights from CPU after torch_memory_saver.resume().
+
+        Counterpart to _save_dspark_draft_to_cpu(). Must be called after
+        resume() and _switch_model("actor"), because _switch_model restores
+        policy weights but skips draft_model params.
+        """
+        cpu_backup = getattr(self, "_dspark_draft_cpu_backup", None)
+        if cpu_backup is None:
+            return
+
+        from vime.backends.megatron_utils.dspark.export import get_dspark_model_from_policy_chunk
+
+        draft_model = get_dspark_model_from_policy_chunk(self.model)
+        if draft_model is None:
+            logger.warning("[DSpark] draft_model not found during restore")
+            self._dspark_draft_cpu_backup = None
+            return
+
+        draft_params = dict(draft_model.named_parameters())
+        restored = 0
+        for name, cpu_t in cpu_backup:
+            if name in draft_params:
+                param = draft_params[name]
+                if param.data.shape == cpu_t.shape:
+                    # Cannot use copy_() because torch_memory_saver.pause() freed
+                    # the underlying GPU storage and resume() does not restore
+                    # draft_model params (named_params_and_buffers skips them).
+                    # Assign a fresh GPU tensor instead.
+                    param.data = cpu_t.to(param.device, dtype=param.dtype).clone()
+                    restored += 1
+                else:
+                    logger.warning(
+                        "[DSpark] Shape mismatch on restore: %s: cpu %s vs gpu %s",
+                        name,
+                        tuple(cpu_t.shape),
+                        tuple(param.data.shape),
+                    )
+
+        self._dspark_draft_cpu_backup = None  # consume the backup
+        logger.info("[DSpark] Restored %d/%d draft weights from CPU", restored, len(cpu_backup))
 
     def _get_rollout_data(self, rollout_data_ref: Box) -> RolloutBatch:
         # Fetch data through ray on CPU, not sure if this will be performance bottleneck.
@@ -514,13 +653,6 @@ class MegatronTrainRayActor(TrainRayActor):
             # Train
             if self.args.use_routing_replay:
                 os.environ["ROUTING_REPLAY_STAGE"] = "replay_backward"
-            # When dumping train debug data but the actor log_probs were not
-            # recomputed separately (can_reuse_log_probs_in_loss / use_rollout_logprobs),
-            # snapshot them from the training forward so the dump still carries
-            # per-sample log_probs — at no extra forward pass.
-            capture_log_probs = self.args.save_debug_train_data is not None and "log_probs" not in rollout_data
-            if capture_log_probs:
-                enable_log_prob_capture()
             with timer("actor_train"):
                 train(
                     rollout_id,
@@ -531,14 +663,6 @@ class MegatronTrainRayActor(TrainRayActor):
                     num_microbatches,
                     global_batch_sizes,
                 )
-            if capture_log_probs:
-                captured = drain_captured_log_probs()
-                # `captured` is non-empty only on the last PP stage running a loss
-                # that snapshots log_probs (policy_loss), and then covers every
-                # local sample. Key it by this rank's `partition` to land in local
-                # sample order; skip otherwise (nothing to place).
-                if captured:
-                    rollout_data["log_probs"] = [captured[pos] for pos in rollout_data["partition"]]
 
             self.prof.step(rollout_id=rollout_id)
 
@@ -549,6 +673,16 @@ class MegatronTrainRayActor(TrainRayActor):
 
         # update the cpu actor weight to the latest model
         self.weights_backuper.backup("actor")
+
+        # DSpark: cache draft weights to CPU BEFORE sleep()/offload.
+        # Draft model params are NOT covered by weights_backuper, so they
+        # must be explicitly cached here while the model is still on GPU.
+        # torch_memory_saver.pause() in sleep() will invalidate GPU pointers.
+        if (
+            getattr(self.args, "dspark_enabled", False)
+            and (self.args.vllm_speculative_config or {}).get("method") == "dspark"
+        ):
+            self.weight_updater.cache_dspark_draft_weights()
 
         # Update ref model if needed
         if (
@@ -604,14 +738,13 @@ class MegatronTrainRayActor(TrainRayActor):
             num_new_engines,
             engine_gpu_counts,
             engine_gpu_offsets,
-            engine_parallel_configs,
         ) = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
 
         reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
 
         if not rollout_engines and not reconnect_rollout_engines:
             if dist.get_rank() == 0:
-                logger.info("No updatable VLLM engines are running; skip weight update.")
+                logger.info("No updatable vLLM engines are running; skip weight update.")
             return
 
         if reconnect_rollout_engines:
@@ -625,13 +758,46 @@ class MegatronTrainRayActor(TrainRayActor):
                 rollout_engine_lock,
                 engine_gpu_counts=engine_gpu_counts,
                 engine_gpu_offsets=engine_gpu_offsets,
-                engine_parallel_configs=engine_parallel_configs,
             )
             dist.barrier(group=get_gloo_group())
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+        _skip_tms = getattr(self.args, "dspark_pretrained_model", None)
+        if self.args.offload_train and not _skip_tms:
+            _tms_ctx = torch_memory_saver.disable()
+        elif self.args.offload_train and _skip_tms:
+            # DSpark pre-trained: use disable() directly. pause() is now called
+            # in sleep() (with try/except), so interesting_region should be
+            # in the correct state for disable() to work without asserting.
+            try:
+                _tms_ctx = torch_memory_saver.disable()
+            except Exception as e:
+                logger.warning(
+                    "[DSpark] torch_memory_saver.disable() failed, falling back to _tms_disable_safe: %s", e
+                )
+                _tms_ctx = _tms_disable_safe()
+        else:
+            _tms_ctx = nullcontext()
+        with _tms_ctx:
+            # DSpark: restore draft weights from CPU backup.
+            # torch_memory_saver.disable() restores policy weights but NOT
+            # draft_model params (skipped by named_params_and_buffers).
+            # For colocate mode, wake_up() is NOT called in update_weights(),
+            # so draft weights are still zero on GPU without this restore.
+            self._restore_dspark_draft_from_cpu()
+
+            # DSpark: cache draft weights for weight sync.
+            # On the first update_weights() call, _ipc_engine was None when
+            # cache_dspark_draft_weights() was called in train_actor(), so
+            # the cache was not populated. Now _ipc_engine is set (after
+            # connect_rollout_engines), so we can cache here.
+            if (
+                getattr(self.args, "dspark_enabled", False)
+                and (self.args.vllm_speculative_config or {}).get("method") == "dspark"
+            ):
+                self.weight_updater.cache_dspark_draft_weights()
+
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")
@@ -653,21 +819,18 @@ class MegatronTrainRayActor(TrainRayActor):
             destroy_process_groups()
 
     def load_other_checkpoint(self, model_tag: str, path: str) -> None:
-        old_args = (
-            self.args.load,
-            self.args.no_load_optim,
-            self.args.no_load_rng,
-            self.args.finetune,
-            self.args.ckpt_step,
-        )
+        old_args = self.args.load, self.args.no_load_optim, self.args.no_load_rng, self.args.finetune
         self.args.load = path
         self.args.no_load_optim = True
         self.args.no_load_rng = True
         self.args.finetune = True
 
+        old_ckpt_step = None
         if model_tag == "ref" and self.args.ref_ckpt_step is not None:
+            old_ckpt_step = self.args.ckpt_step
             self.args.ckpt_step = self.args.ref_ckpt_step
         elif model_tag == "teacher" and self.args.opd_teacher_ckpt_step is not None:
+            old_ckpt_step = self.args.ckpt_step
             self.args.ckpt_step = self.args.opd_teacher_ckpt_step
 
         _, _ = load_checkpoint(
@@ -677,13 +840,10 @@ class MegatronTrainRayActor(TrainRayActor):
             checkpointing_context={},
             skip_load_to_model_and_opt=False,
         )
-        (
-            self.args.load,
-            self.args.no_load_optim,
-            self.args.no_load_rng,
-            self.args.finetune,
-            self.args.ckpt_step,
-        ) = old_args
+        self.args.load, self.args.no_load_optim, self.args.no_load_rng, self.args.finetune = old_args
+
+        if old_ckpt_step is not None:
+            self.args.ckpt_step = old_ckpt_step
 
         self.weights_backuper.backup(model_tag)
         self._active_model_tag = model_tag

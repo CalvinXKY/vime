@@ -1,30 +1,27 @@
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
-
-from vime.utils.types import ParamInfo
 
 
 class HfWeightIteratorBase(ABC):
     @staticmethod
     def create(args, model, **kwargs):
+        from .hf_weight_iterator_bridge import HfWeightIteratorBridge
         from .hf_weight_iterator_direct import HfWeightIteratorDirect
 
-        return HfWeightIteratorDirect(args, model, **kwargs)
+        c = {
+            "raw": HfWeightIteratorDirect,
+            "bridge": HfWeightIteratorBridge,
+        }[args.megatron_to_hf_mode]
 
-    def __init__(self, args, model, model_name, quantization_config, transform_ue8m0=False):
+        return c(args, model, **kwargs)
+
+    def __init__(self, args, model, model_name, quantization_config):
         self.args = args
         self.model = model
         self.model_name = model_name
         self.quantization_config = quantization_config
-        self.transform_ue8m0 = transform_ue8m0
 
     @abstractmethod
-    def get_hf_weight_chunks(
-        self,
-        megatron_local_weights,
-        progress_desc: str = "Update weights",
-        param_info_buckets: Sequence[Sequence[ParamInfo]] | None = None,
-    ):
+    def get_hf_weight_chunks(self, megatron_local_weights, progress_desc: str = "Update weights"):
         """
         Mental model of the API:
         megatron_model.to_hf_magically().named_parameters()
