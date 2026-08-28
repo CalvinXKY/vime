@@ -149,24 +149,18 @@ def get_batch(
 
     multimodal_train_inputs = batch.get("multimodal_train_inputs", None)
     if multimodal_train_inputs is not None:
-        per_key_tensors = {}
+        multimodal_data = {}
         for mm_input_dict in multimodal_train_inputs:
             if mm_input_dict is not None:
                 for key, mm_tensor in mm_input_dict.items():
-                    per_key_tensors.setdefault(key, []).append(mm_tensor)
-        multimodal_data = {}
-        for key, tensors in per_key_tensors.items():
-            device = next((t.device for t in tensors if isinstance(t, torch.Tensor)), None)
-            tensors = [t if isinstance(t, torch.Tensor) else torch.as_tensor(t, device=device) for t in tensors]
-            if len(tensors) == 1:
-                multimodal_data[key] = tensors[0]
-                continue
-            if key in {"input_features", "feature_attention_mask"}:
-                max_len = max(t.shape[-1] for t in tensors)
-                padded = [F.pad(t, (0, max_len - t.shape[-1]), value=0) for t in tensors]
-                multimodal_data[key] = torch.cat(padded, dim=0)
-            else:
-                multimodal_data[key] = torch.cat(tensors, dim=0)
+                    mm_tensor = torch.atleast_1d(torch.as_tensor(mm_tensor))
+                    if key in multimodal_data:
+                        current = multimodal_data[key]
+                        max_len = max(current.shape[-1], mm_tensor.shape[-1])
+                        mm_tensor = torch.cat(
+                            [F.pad(tensor, (0, max_len - tensor.shape[-1])) for tensor in (current, mm_tensor)]
+                        )
+                    multimodal_data[key] = mm_tensor
         batch["multimodal_train_inputs"] = multimodal_data
 
     return batch

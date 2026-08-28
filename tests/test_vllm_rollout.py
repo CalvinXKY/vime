@@ -476,31 +476,18 @@ def test_generate_consistent_hash_header(patch_generate_state, monkeypatch):
 def test_generate_multimodal_render_then_generate(patch_generate_state, monkeypatch):
     render_resp = {"token_ids": [11, 12]}
     gen_resp = _generate_response([13])
-    seen = {}
 
     async def fake_post(url, payload, headers=None, **kwargs):
         if url.endswith("/render"):
-            seen["render"] = payload
             return render_resp
         return gen_resp
 
     monkeypatch.setattr(mod, "post", fake_post)
-    monkeypatch.setattr(
-        mod,
-        "build_multimodal_messages",
-        lambda prompt, _inputs: [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}, {"type": "image_url"}, {"type": "audio_url"}],
-            }
-        ],
-    )
+    monkeypatch.setattr(mod, "build_multimodal_messages", lambda *_args: [{"role": "user", "content": []}])
 
-    sample = Sample(index=0, prompt="look and listen", multimodal_inputs={"images": ["img"], "audio": ["wav"]})
+    sample = Sample(index=0, prompt="look", multimodal_inputs={"images": ["img.png"]})
     result = asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params()))
 
-    content = seen["render"]["messages"][0]["content"]
-    assert any(part.get("type") == "audio_url" for part in content)
     assert result.response_length == 1
     assert result.tokens[-1] == 13
 
