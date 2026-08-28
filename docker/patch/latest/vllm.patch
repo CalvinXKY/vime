@@ -240,42 +240,33 @@ index a3b00aaad2..2b05c5e2f5 100644
 diff --git a/vllm/model_executor/models/qwen3_omni_moe_thinker.py b/vllm/model_executor/models/qwen3_omni_moe_thinker.py
 --- a/vllm/model_executor/models/qwen3_omni_moe_thinker.py
 +++ b/vllm/model_executor/models/qwen3_omni_moe_thinker.py
-@@ -28,6 +28,7 @@
- from typing import Any, cast
- 
-+import os
- import numpy as np
- import torch
- import torch.nn as nn
-@@ -45,7 +46,7 @@
- from vllm.compilation.decorators import support_torch_compile
+@@ -45,6 +45,6 @@ from vllm.compilation.decorators import support_torch_compile
  from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
  from vllm.config.speech_to_text import SpeechToTextParams
 -from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-+from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank
++from vllm.distributed import get_pp_group
  from vllm.inputs import PromptType
  from vllm.logger import init_logger
  from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
-@@ -188,8 +189,8 @@
+@@ -188,8 +188,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
          self.embed_dim = config.d_model
          self.num_heads = config.encoder_attention_heads
          self.head_dim = self.embed_dim // self.num_heads
 -        tp_size = get_tensor_model_parallel_world_size()
 -        self.num_local_heads = self.num_heads // tp_size
-+        # Audio encoder uses 20 heads; not divisible by common TP sizes.
 +        self.num_local_heads = self.num_heads
  
          if (self.head_dim * self.num_heads) != self.embed_dim:
              raise ValueError(
-@@ -206,6 +207,7 @@
+@@ -213,6 +212,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
              total_num_kv_heads=self.num_heads,
              bias=True,
-             prefix=f"{prefix}.qkv",
+             prefix=f"{prefix}.qkv_proj",
 +            disable_tp=True,
          )
  
          self.out_proj = RowParallelLinear(
-@@ -213,6 +215,7 @@
+@@ -213,6 +213,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
              output_size=self.embed_dim,
              bias=True,
              prefix=f"{prefix}.out_proj",
@@ -283,109 +274,3 @@ diff --git a/vllm/model_executor/models/qwen3_omni_moe_thinker.py b/vllm/model_e
          )
  
          self.attn = MMEncoderAttention(
-@@ -433,6 +436,9 @@
-         feature_lens: torch.Tensor,
-         aftercnn_lens: torch.Tensor,
-     ):
-+        # Snapshot before chunking; feature_lens may be derived/mutated later.
-+        _original_feature_lens = feature_lens
-+        _original_input_features = input_features
-         # Compute chunk information
-         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
- 
-@@ -527,6 +533,38 @@
-         hidden_states = self.proj1(hidden_states)
-         hidden_states = self.act(hidden_states)
-         hidden_states = self.proj2(hidden_states)
-+
-+        # Optional: dump audio encoder outputs for Vime train/infer alignment.
-+        # Only TP rank 0 writes: with disable_tp=True every TP rank runs this
-+        # encoder fully, so unguarded dumps race on _counter and corrupt .pt files.
-+        if (
-+            get_tensor_model_parallel_rank() == 0
-+            and os.environ.get("VIME_OMNI_DUMP_FEATURES", "1")
-+            not in ("0", "false", "False")
-+        ):
-+            _audio_save_dir = os.environ.get(
-+                "VIME_OMNI_AUDIO_FEATURES_DIR", "/tmp/vime_omni_audio_features"
-+            )
-+            os.makedirs(_audio_save_dir, exist_ok=True)
-+            _audio_fp = _original_input_features.float().sum().item()
-+            _audio_counter_path = f"{_audio_save_dir}/_counter"
-+            try:
-+                with open(_audio_counter_path, "r") as _cf:
-+                    _audio_call_idx = int(_cf.read().strip())
-+            except (FileNotFoundError, ValueError):
-+                _audio_call_idx = 0
-+            torch.save(
-+                {
-+                    "audio_output": hidden_states.detach().cpu(),
-+                    "feature_lens": _original_feature_lens.detach().cpu()
-+                    if _original_feature_lens is not None
-+                    else None,
-+                    "input_fingerprint": _audio_fp,
-+                },
-+                f"{_audio_save_dir}/audio_{_audio_call_idx}.pt",
-+            )
-+            with open(_audio_counter_path, "w") as _cf:
-+                _cf.write(str(_audio_call_idx + 1))
- 
-         return hidden_states
- 
-@@ -937,6 +975,8 @@
-         x: torch.Tensor,
-         grid_thw: list[list[int]],
-     ) -> torch.Tensor:
-+        # Preserve raw pixels before deepstack loop rebinds local name `x`.
-+        _original_input = x
-         hidden_states = x.to(device=self.device, dtype=self.dtype)
-         hidden_states = self.patch_embed(hidden_states)
- 
-@@ -1028,6 +1068,47 @@
-             hidden_states = torch.cat(
-                 processed_hidden_states_list, dim=1
-             )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
-+
-+
-+        # Optional: dump vision encoder outputs for Vime train/infer alignment.
-+        # Only TP rank 0 writes to avoid counter races / concurrent torch.save.
-+        if (
-+            get_tensor_model_parallel_rank() == 0
-+            and os.environ.get("VIME_OMNI_DUMP_FEATURES", "1")
-+            not in ("0", "false", "False")
-+        ):
-+            save_dir = os.environ.get(
-+                "VIME_OMNI_VISION_FEATURES_DIR", "/tmp/vime_omni_vision_features"
-+            )
-+            os.makedirs(save_dir, exist_ok=True)
-+            if deepstack_visual_indexes is not None:
-+                multiscale_len = len(deepstack_visual_indexes)
-+                visual_dim = hidden_states.shape[-1] // (multiscale_len + 1)
-+                main_output = hidden_states[:, :visual_dim]
-+                multiscale_output = hidden_states[:, visual_dim:]
-+                ds_list = list(multiscale_output.chunk(multiscale_len, dim=-1))
-+            else:
-+                main_output = hidden_states
-+                ds_list = None
-+            counter_path = f"{save_dir}/_counter"
-+            try:
-+                with open(counter_path, "r") as cf:
-+                    call_idx = int(cf.read().strip())
-+            except (FileNotFoundError, ValueError):
-+                call_idx = 0
-+            torch.save(
-+                {
-+                    "main_output": main_output.detach().cpu(),
-+                    "deepstack_features": [f.detach().cpu() for f in ds_list]
-+                    if ds_list
-+                    else None,
-+                    "grid_thw": grid_thw.detach().cpu() if grid_thw is not None else None,
-+                    "pixel_fingerprint": _original_input.float().sum().item(),
-+                },
-+                f"{save_dir}/call_{call_idx}.pt",
-+            )
-+            with open(counter_path, "w") as cf:
-+                cf.write(str(call_idx + 1))
- 
-         return hidden_states
- 

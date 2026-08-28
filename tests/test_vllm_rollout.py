@@ -476,45 +476,42 @@ def test_generate_consistent_hash_header(patch_generate_state, monkeypatch):
 def test_generate_multimodal_render_then_generate(patch_generate_state, monkeypatch):
     render_resp = {"token_ids": [11, 12]}
     gen_resp = _generate_response([13])
-
-    async def fake_post(url, payload, headers=None, **kwargs):
-        if url.endswith("/render"):
-            return render_resp
-        return gen_resp
-
-    monkeypatch.setattr(mod, "post", fake_post)
-    monkeypatch.setattr(mod, "encode_image_for_rollout_engine", lambda _img: "data:image/png;base64,xx")
-
-    sample = Sample(index=0, prompt="look", multimodal_inputs={"images": ["img.png"]})
-    result = asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params()))
-
-    assert result.response_length == 1
-    assert result.tokens[-1] == 13
-
-
-@pytest.mark.unit
-def test_generate_audio_uses_render_path(patch_generate_state, monkeypatch):
-    render_resp = {"token_ids": [11, 12]}
-    gen_resp = _generate_response([13])
     seen = {}
 
     async def fake_post(url, payload, headers=None, **kwargs):
         if url.endswith("/render"):
             seen["render"] = payload
             return render_resp
-        seen["generate"] = payload
         return gen_resp
 
     monkeypatch.setattr(mod, "post", fake_post)
-    monkeypatch.setattr(mod, "encode_audio_for_rollout_engine", lambda _a: "data:audio/wav;base64,xx")
+    monkeypatch.setattr(
+        mod,
+        "build_multimodal_messages",
+        lambda prompt, _inputs: [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}, {"type": "image_url"}, {"type": "audio_url"}],
+            }
+        ],
+    )
 
-    sample = Sample(index=0, prompt="listen", multimodal_inputs={"audio": [("arr", 16000)]})
+    sample = Sample(index=0, prompt="look and listen", multimodal_inputs={"images": ["img"], "audio": ["wav"]})
     result = asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params()))
 
-    assert "render" in seen
     content = seen["render"]["messages"][0]["content"]
     assert any(part.get("type") == "audio_url" for part in content)
     assert result.response_length == 1
+    assert result.tokens[-1] == 13
+
+
+@pytest.mark.unit
+def test_build_multimodal_messages_supports_audio_and_video():
+    messages = mod.build_multimodal_messages(
+        "describe",
+        {"audio": ["https://example.com/audio.wav"], "videos": ["https://example.com/video.mp4"]},
+    )
+    assert [item["type"] for item in messages[0]["content"]] == ["text", "audio_url", "video_url"]
 
 
 @pytest.mark.unit
