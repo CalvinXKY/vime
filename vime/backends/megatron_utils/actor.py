@@ -145,7 +145,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 named_params_and_buffers(
                     self.args,
                     self.model,
-                    convert_to_global_name=args.megatron_to_hf_mode == "raw",
+                    convert_to_global_name=True,
                 ),
                 self._iter_dspark_draft_params(),
             ),
@@ -201,7 +201,11 @@ class MegatronTrainRayActor(TrainRayActor):
         self.weight_updater = update_weight_cls(
             self.args,
             self.model,
-            weights_getter=lambda: self.weights_backuper.get("actor"),
+            weights_getter=lambda: {
+                name: tensor
+                for name, tensor in self.weights_backuper.get("actor").items()
+                if ".draft_model." not in name
+            },
             model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
             quantization_config=getattr(self.hf_config, "quantization_config", None),
         )
@@ -317,6 +321,33 @@ class MegatronTrainRayActor(TrainRayActor):
                 continue
             for name, param in draft_model.named_parameters():
                 yield f"vp_stages.{vp_stage}.draft_model.{name}", param
+
+    def _restore_dspark_draft_params_safe(self) -> None:
+        """Restore DSpark draft params from weights_backuper backup to GPU.
+
+        In colocate mode, torch_memory_saver.pause() freed GPU storage, so
+        param.copy_() fails. This method assigns fresh GPU tensors instead,
+        which works even when the original GPU storage is freed.
+        """
+        if "actor" not in self.weights_backuper.backup_tags:
+            return
+        backup_dict = self.weights_backuper.get("actor")
+
+        from vime.backends.megatron_utils.dspark.export import get_dspark_model_from_policy_chunk
+
+        restored = 0
+        for vp_stage, model_module in enumerate(self.model):
+            draft_model = get_dspark_model_from_policy_chunk([model_module])
+            if draft_model is None:
+                continue
+            for name, param in draft_model.named_parameters():
+                key = f"vp_stages.{vp_stage}.draft_model.{name}"
+                if key in backup_dict:
+                    cpu_t = backup_dict[key]
+                    param.data = cpu_t.to(param.device, dtype=param.dtype).clone()
+                    restored += 1
+
+        logger.info("[DSpark] Restored %d draft params from weights_backuper (safe mode)", restored)
 
     def _get_rollout_data(self, rollout_data_ref: Box) -> RolloutBatch:
         # Fetch data through ray on CPU, not sure if this will be performance bottleneck.
@@ -676,6 +707,7 @@ class MegatronTrainRayActor(TrainRayActor):
             num_new_engines,
             engine_gpu_counts,
             engine_gpu_offsets,
+            engine_parallel_configs,
         ) = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
 
         reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
@@ -696,6 +728,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 rollout_engine_lock,
                 engine_gpu_counts=engine_gpu_counts,
                 engine_gpu_offsets=engine_gpu_offsets,
+                engine_parallel_configs=engine_parallel_configs,
             )
             dist.barrier(group=get_gloo_group())
             if dist.get_rank() == 0:
@@ -727,7 +760,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 and (self.args.vllm_speculative_config or {}).get("method") == "dspark"
                 and not reconnect_rollout_engines
             ):
-                self._switch_model("actor")
+                self._restore_dspark_draft_params_safe()
 
             # DSpark: cache draft weights for weight sync.
             # On the first update_weights() call, _ipc_engine was None when
