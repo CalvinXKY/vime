@@ -230,6 +230,7 @@ def make_vime_validate_args(**overrides):
         rollout_num_gpus=8,
         eval_function_path=None,
         rollout_function_path="custom.rollout",
+        vllm_speculative_config=None,
         num_steps_per_rollout=None,
         rollout_batch_size=1,
         n_samples_per_prompt=1,
@@ -283,6 +284,16 @@ def test_vime_validate_args_defaults_start_rollout_id_to_zero(monkeypatch):
     module.vime_validate_args(args)
 
     assert args.start_rollout_id == 0
+
+
+@pytest.mark.unit
+def test_vime_validate_args_derives_dspark_from_speculative_method(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(vllm_speculative_config={"method": "dspark"})
+
+    module.vime_validate_args(args)
+
+    assert args.dspark_enabled is True
 
 
 @pytest.mark.unit

@@ -107,14 +107,17 @@ class RecordingEngine:
 
 
 class RecordingTrainer:
-    def __init__(self, client, *, fail=False):
+    def __init__(self, client, *, source=None, fail=False):
         self.client = client
+        self.source = source
         self.fail = fail
         self.draft_states = []
+        self.source_draft_states = []
         self.shutdown_calls = 0
 
     def send_weights(self):
         self.draft_states.append(self.client.draft)
+        self.source_draft_states.append(getattr(self.source, "draft", False))
         self.client.start_weight_update()
         if self.fail:
             raise RuntimeError("transfer failed")
@@ -132,6 +135,8 @@ def _args(**overrides):
         "rollout_num_gpus_per_engine": 2,
         "update_weight_buffer_size": 1024,
         "enable_mtp_training": False,
+        "dspark_enabled": False,
+        "dspark_pretrained_model": None,
         "vllm_speculative_config": None,
     }
     values.update(overrides)
@@ -151,7 +156,7 @@ def _updater(update_module, **overrides):
     updater._hf_weight_iterator = MagicMock()
     updater._full_param_info_buckets = None
     updater._non_expert_param_info_buckets = None
-    updater._source = object()
+    updater._source = types.SimpleNamespace(draft=False)
     updater._ipc_gather_group = None
     updater._ipc_gather_src = None
     updater._ipc_engine = None
@@ -262,6 +267,28 @@ def test_native_update_runs_main_and_draft_lifecycles(update_module, monkeypatch
     assert len(engine.start_draft_weight_update.calls) == 1
     assert len(engine.finish_weight_update.calls) == 2
     assert len(engine.continue_generation.calls) == 1
+
+
+@pytest.mark.unit
+def test_native_dspark_update_uses_draft_source_and_lifecycle(update_module, monkeypatch):
+    updater = _updater(
+        update_module,
+        dspark_enabled=True,
+        vllm_speculative_config={"method": "dspark"},
+    )
+    engine = RecordingEngine()
+    updater._all_rollout_engines = [engine]
+    client = update_module.VimeRayWeightSyncClient([engine], lambda: updater.weight_version)
+    trainer = RecordingTrainer(client, source=updater._source)
+    updater._native_trainers = [trainer]
+    monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
+
+    updater.update_weights()
+
+    assert trainer.draft_states == [False, True]
+    assert trainer.source_draft_states == [False, True]
+    assert updater._source.draft is False
+    assert len(engine.start_draft_weight_update.calls) == 1
 
 
 @pytest.mark.unit

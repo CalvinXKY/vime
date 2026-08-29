@@ -9,7 +9,7 @@ The DSpark draft model is a semi-autoregressive speculative decoding drafter:
 
 Unlike Eagle3 (which uses ModelOpt's EagleModule with Megatron TP support),
 DSpark's dual-input attention has no existing Megatron implementation, so
-this module uses plain ``nn.Linear`` + SDPA (TP=1 in Phase 1).
+this module is replicated on every TP rank and uses plain ``nn.Linear`` + SDPA.
 
 The model is attached as ``policy_chunk.draft_model`` before DDP wrapping,
 following the NeMo RL Eagle3 pattern.
@@ -170,9 +170,9 @@ def _compute_intermediate_size(config: DSparkConfig) -> int:
 class DSparkModel(nn.Module):
     """DSpark draft model: parallel backbone + Markov head + confidence head.
 
-    This is NOT a MegatronModule in Phase 1 (TP=1). It is a plain nn.Module
-    attached as ``policy_chunk.draft_model``. DDP wrapping on the parent
-    policy chunk will still cover its parameters.
+    This is a plain ``nn.Module`` attached as ``policy_chunk.draft_model`` and
+    replicated on every TP rank. DDP wrapping on the parent policy chunk still
+    covers its parameters.
 
     Structure:
         - embed_tokens: shared from policy (frozen by default)
@@ -233,7 +233,7 @@ class DSparkModel(nn.Module):
 
         When policy uses TP>1, Megatron's VocabParallelEmbedding shards
         the vocab dimension across TP ranks. We all-gather to reconstruct
-        the full vocab embedding for DSpark (which is TP=1).
+        the full vocab embedding for the replicated DSpark model.
         """
         embed_weight = embed_tokens.weight.detach()
         lm_head_weight = lm_head.weight.detach()
@@ -563,10 +563,40 @@ def build_dspark_model(
     return model
 
 
-__all__ = [
-    "DSparkModel",
-    "DSparkDecoderLayer",
-    "DSparkRMSNorm",
-    "DSparkMLP",
-    "build_dspark_model",
-]
+def attach_dspark_model(model, args, config) -> None:
+    dspark_config = DSparkConfig(
+        block_size=args.dspark_block_size,
+        num_draft_layers=args.dspark_num_draft_layers,
+        target_layer_ids=args.dspark_target_layer_ids,
+        mask_token_id=args.dspark_mask_token_id,
+        num_anchors=args.dspark_num_anchors,
+        markov_rank=args.dspark_markov_rank,
+        markov_head_type=args.dspark_markov_head_type,
+        enable_confidence_head=not args.dspark_disable_confidence_head,
+        ce_loss_alpha=args.dspark_ce_loss_alpha,
+        l1_loss_alpha=args.dspark_l1_loss_alpha,
+        confidence_head_alpha=args.dspark_confidence_head_alpha,
+        loss_decay_gamma=args.dspark_loss_decay_gamma,
+        draft_loss_weight=args.dspark_draft_loss_weight,
+        hidden_size=config.hidden_size,
+        vocab_size=args.padded_vocab_size,
+        org_vocab_size=args.vocab_size,
+        num_attention_heads=config.num_attention_heads,
+        num_key_value_heads=getattr(config, "num_query_groups", config.num_attention_heads),
+        head_dim=getattr(config, "kv_channels", config.hidden_size // config.num_attention_heads),
+        rms_norm_eps=getattr(config, "layernorm_epsilon", 1e-6),
+        rotary_base=getattr(config, "rotary_base", 10000.0),
+        intermediate_size=args.dspark_intermediate_size,
+    )
+    policy_embed = getattr(model.embedding, "word_embeddings", model.embedding)
+    policy_lm_head = getattr(model, "output_layer", None)
+    if policy_lm_head is None or getattr(policy_lm_head, "weight", None) is None:
+        policy_lm_head = policy_embed
+    model.draft_model = build_dspark_model(
+        dspark_config,
+        policy_embed,
+        policy_lm_head,
+        args.dspark_pretrained_model,
+    )
+    for param in model.draft_model.parameters():
+        param.grad_norm_group = "dspark"
