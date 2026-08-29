@@ -214,6 +214,36 @@ class UpdateWeightFromTensor:
                     distributed_gpu_counts,
                 )
                 self._native_trainers.append(trainer)
+
+            # DSpark: Set _ipc_engine and _ipc_gather_src for non-MoE models.
+            # This is needed for cache_dspark_draft_weights() and
+            # _sync_dspark_draft_weights_direct() to work. Without this,
+            # draft model weights are never synced to vLLM (spec_accept_rate=0%).
+            if self._ipc_gather_group is None:
+                for index in range(colocate_engine_nums):
+                    group_ranks = list(
+                        range(
+                            colocate_gpu_offsets[index],
+                            colocate_gpu_offsets[index] + colocate_gpu_counts[index],
+                        )
+                    )
+                    new_group = dist.new_group(ranks=group_ranks, backend="gloo")
+                    if dist.get_rank() in group_ranks:
+                        self._ipc_gather_group = new_group
+                        self._ipc_gather_src = colocate_gpu_offsets[index]
+
+            for index, engine in enumerate(self.rollout_engines):
+                start = colocate_gpu_offsets[index]
+                if start <= dist.get_rank() < start + colocate_gpu_counts[index]:
+                    self._ipc_engine = engine
+
+            if dist.get_rank() == 0:
+                ray.get(
+                    [
+                        engine.init_weight_transfer_engine.remote({"init_info": {"packed": True}})
+                        for engine in self.rollout_engines
+                    ]
+                )
             return
 
         # Rank-local expert routing is the one case the generic IPC API cannot

@@ -133,6 +133,7 @@ def _get_model_provider_func(
         _te_broken = _os.environ.get("DSPARK_DISABLE_TE", "")
         if _te_broken:
             args.transformer_impl = "local"
+            args.apply_rope_fusion = False
         use_te = args.transformer_impl == "transformer_engine"
 
         # Experimental loading arguments from yaml
@@ -175,7 +176,6 @@ def _get_model_provider_func(
                         qk_layernorm=args.qk_layernorm,
                         multi_latent_attention=args.multi_latent_attention,
                         moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
-                        normalization=args.normalization,
                     )
                 else:
                     transformer_layer_spec = get_gpt_layer_local_spec(
