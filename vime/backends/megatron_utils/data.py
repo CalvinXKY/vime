@@ -147,17 +147,20 @@ def get_batch(
     assert loss_masks.shape == tokens.shape, f"loss_masks.shape: {loss_masks.shape}, tokens.shape: {tokens.shape}"
     batch["full_loss_masks"] = loss_masks
 
-    # Process multimodal training tensors if present
     multimodal_train_inputs = batch.get("multimodal_train_inputs", None)
     if multimodal_train_inputs is not None:
-        multimodal_data = {}  # key -> concatenated tensor
+        multimodal_data = {}
         for mm_input_dict in multimodal_train_inputs:
             if mm_input_dict is not None:
                 for key, mm_tensor in mm_input_dict.items():
-                    if key not in multimodal_data:
-                        multimodal_data[key] = mm_tensor
-                    else:
-                        multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=0)
+                    mm_tensor = torch.atleast_1d(torch.as_tensor(mm_tensor))
+                    if key in multimodal_data:
+                        current = multimodal_data[key]
+                        max_len = max(current.shape[-1], mm_tensor.shape[-1])
+                        mm_tensor = torch.cat(
+                            [F.pad(tensor, (0, max_len - tensor.shape[-1])) for tensor in (current, mm_tensor)]
+                        )
+                    multimodal_data[key] = mm_tensor
         batch["multimodal_train_inputs"] = multimodal_data
 
     return batch

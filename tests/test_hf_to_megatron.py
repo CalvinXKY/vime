@@ -32,6 +32,7 @@ from vime.backends.megatron_utils.hf_to_megatron.qwen import (
     qwen_moe_hf_tensor,
 )
 from vime.backends.megatron_utils.hf_to_megatron.qwen3_next import qwen3_next_hf_tensor
+from vime.backends.megatron_utils.hf_to_megatron.qwen3_omni import qwen3_omni_hf_tensor
 from vime.backends.megatron_utils.megatron_to_hf import _convert_to_hf_core, convert_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.deepseekv3 import convert_deepseekv3_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.glm4 import convert_glm4_to_hf
@@ -40,6 +41,7 @@ from vime.backends.megatron_utils.megatron_to_hf.mimo import convert_mimo_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.minimax_m2 import convert_minimax_m2_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.qwen2 import convert_qwen2_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.qwen3_next import convert_qwen3_next_to_hf
+from vime.backends.megatron_utils.megatron_to_hf.qwen3_omni import convert_qwen3_omni_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.qwen3moe import convert_qwen3moe_to_hf
 from vime.backends.megatron_utils.update_weight.hf_weight_iterator_base import HfWeightIteratorBase
 
@@ -187,6 +189,38 @@ def test_hf_and_megatron_mappings_round_trip(loader, exporter, model_type, name,
     loaded = loader(name, Reader(**hf_tensors), config)
 
     assert torch.equal(loaded, parameter)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "name",
+    [
+        "module.module.language_model.decoder.layers.0.self_attention.linear_qkv.weight",
+        "module.module.language_model.decoder.layers.0.mlp.experts.linear_fc1.weight3",
+    ],
+)
+def test_qwen3_omni_language_mapping_round_trip(name):
+    parameter = torch.arange(16 * 8).reshape(16, 8)
+    tensors = dict(convert_qwen3_omni_to_hf(_EXPORT_ARGS, name, parameter))
+    text_config = _config("qwen3_moe")
+    text_config.hidden_size = 8
+    text_config.num_attention_heads = 4
+    text_config.num_key_value_heads = 2
+    loaded = qwen3_omni_hf_tensor(
+        name,
+        Reader(**tensors),
+        types.SimpleNamespace(thinker_config=types.SimpleNamespace(text_config=text_config)),
+    )
+    assert torch.equal(loaded, parameter)
+
+
+@pytest.mark.unit
+def test_qwen3_omni_encoder_mapping_is_replicated():
+    parameter = torch.randn(4, 8)
+    name = "module.module.audio_model.layers.0.weight"
+    tensors = dict(convert_qwen3_omni_to_hf(_EXPORT_ARGS, name, parameter))
+    loaded = qwen3_omni_hf_tensor(name, Reader(**tensors), types.SimpleNamespace())
+    assert loaded is parameter
 
 
 @pytest.mark.unit
@@ -365,6 +399,7 @@ def test_loader_scope_stays_explicit():
         "qwen3_5_moe",
         "qwen3_moe",
         "qwen3_next",
+        "qwen3_omni_moe",
     }
 
 

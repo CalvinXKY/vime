@@ -8,6 +8,7 @@ from .glm import glm4_hf_tensor, glm4_moe_hf_tensor
 from .qwen import mimo_hf_tensor, minimax_m2_hf_tensor, qwen_hf_tensor, qwen_moe_hf_tensor
 from .qwen3_5 import qwen3_5_hf_tensor
 from .qwen3_next import qwen3_next_hf_tensor
+from .qwen3_omni import qwen3_omni_hf_tensor
 
 _LOADERS = {
     "deepseek_v3": deepseek_hf_tensor,
@@ -27,6 +28,7 @@ _LOADERS = {
     "qwen3_5_moe": qwen3_5_hf_tensor,
     "qwen3_moe": qwen_moe_hf_tensor,
     "qwen3_next": qwen3_next_hf_tensor,
+    "qwen3_omni_moe": qwen3_omni_hf_tensor,
 }
 
 

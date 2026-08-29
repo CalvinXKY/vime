@@ -483,13 +483,22 @@ def test_generate_multimodal_render_then_generate(patch_generate_state, monkeypa
         return gen_resp
 
     monkeypatch.setattr(mod, "post", fake_post)
-    monkeypatch.setattr(mod, "encode_image_for_rollout_engine", lambda _img: "data:image/png;base64,xx")
+    monkeypatch.setattr(mod, "build_multimodal_messages", lambda *_args: [{"role": "user", "content": []}])
 
     sample = Sample(index=0, prompt="look", multimodal_inputs={"images": ["img.png"]})
     result = asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params()))
 
     assert result.response_length == 1
     assert result.tokens[-1] == 13
+
+
+@pytest.mark.unit
+def test_build_multimodal_messages_supports_audio_and_video():
+    messages = mod.build_multimodal_messages(
+        "describe",
+        {"audio": ["https://example.com/audio.wav"], "videos": ["https://example.com/video.mp4"]},
+    )
+    assert [item["type"] for item in messages[0]["content"]] == ["text", "audio_url", "video_url"]
 
 
 @pytest.mark.unit

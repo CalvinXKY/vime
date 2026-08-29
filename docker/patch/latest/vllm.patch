@@ -237,3 +237,40 @@ index a3b00aaad2..2b05c5e2f5 100644
              except BaseException:
                  self._weight_update_active = False
                  self.weight_transfer_engine.reset_weight_update_target()
+diff --git a/vllm/model_executor/models/qwen3_omni_moe_thinker.py b/vllm/model_executor/models/qwen3_omni_moe_thinker.py
+--- a/vllm/model_executor/models/qwen3_omni_moe_thinker.py
++++ b/vllm/model_executor/models/qwen3_omni_moe_thinker.py
+@@ -45,6 +45,6 @@ from vllm.compilation.decorators import support_torch_compile
+ from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+ from vllm.config.speech_to_text import SpeechToTextParams
+-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
++from vllm.distributed import get_pp_group
+ from vllm.inputs import PromptType
+ from vllm.logger import init_logger
+ from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
+@@ -188,8 +188,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
+         self.embed_dim = config.d_model
+         self.num_heads = config.encoder_attention_heads
+         self.head_dim = self.embed_dim // self.num_heads
+-        tp_size = get_tensor_model_parallel_world_size()
+-        self.num_local_heads = self.num_heads // tp_size
++        self.num_local_heads = self.num_heads
+ 
+         if (self.head_dim * self.num_heads) != self.embed_dim:
+             raise ValueError(
+@@ -213,6 +212,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
+             total_num_kv_heads=self.num_heads,
+             bias=True,
+             prefix=f"{prefix}.qkv_proj",
++            disable_tp=True,
+         )
+ 
+         self.out_proj = RowParallelLinear(
+@@ -213,6 +213,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
+             output_size=self.embed_dim,
+             bias=True,
+             prefix=f"{prefix}.out_proj",
++            disable_tp=True,
+         )
+ 
+         self.attn = MMEncoderAttention(
