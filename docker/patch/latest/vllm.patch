@@ -237,3 +237,13 @@ index a3b00aaad2..2b05c5e2f5 100644
              except BaseException:
                  self._weight_update_active = False
                  self.weight_transfer_engine.reset_weight_update_target()
+diff --git a/vllm/model_executor/models/qwen3_dspark.py b/vllm/model_executor/models/qwen3_dspark.py
+--- a/vllm/model_executor/models/qwen3_dspark.py
++++ b/vllm/model_executor/models/qwen3_dspark.py
+@@ -311,4 +311,5 @@ class Qwen3DSparkModel(nn.Module):
+         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
+         loader = AutoWeightsLoader(self)
+         loader.load_weights(model_weights.items(), mapper=mapper)
+-        self.model._build_fused_kv_buffers()
++        if hasattr(self.model, "_num_attn_layers"):
++            del self.model._num_attn_layers

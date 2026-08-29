@@ -128,12 +128,6 @@ def _get_model_provider_func(
         Returns:
             Union[GPTModel, megatron.legacy.model.GPTModel]: The returned model
         """
-        import os as _os
-
-        _te_broken = _os.environ.get("DSPARK_DISABLE_TE", "")
-        if _te_broken:
-            args.transformer_impl = "local"
-            args.apply_rope_fusion = False
         use_te = args.transformer_impl == "transformer_engine"
 
         # Experimental loading arguments from yaml
@@ -184,7 +178,6 @@ def _get_model_provider_func(
                         qk_layernorm=args.qk_layernorm,
                         multi_latent_attention=args.multi_latent_attention,
                         moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
-                        normalization=args.normalization,
                     )
 
         build_model_context = nullcontext
@@ -241,58 +234,10 @@ def _get_model_provider_func(
         if post_process and role == "critic":
             model.output_layer = LinearForLastLayer(input_size=config.hidden_size, output_size=1, config=config)
 
-        # DSpark draft model attachment (only for actor, post_process, last PP stage)
-        if getattr(args, "dspark_enabled", False) and role == "actor" and post_process:
-            from vime.backends.megatron_utils.dspark import DSparkConfig, build_dspark_model
+        if args.dspark_enabled and role == "actor" and post_process:
+            from vime.backends.megatron_utils.dspark.modeling import attach_dspark_model
 
-            dspark_config = DSparkConfig(
-                block_size=args.dspark_block_size,
-                num_draft_layers=args.dspark_num_draft_layers,
-                target_layer_ids=tuple(int(x) for x in args.dspark_target_layer_ids.split(",")),
-                mask_token_id=args.dspark_mask_token_id,
-                num_anchors=args.dspark_num_anchors,
-                markov_rank=args.dspark_markov_rank,
-                markov_head_type=args.dspark_markov_head_type,
-                enable_confidence_head=not args.dspark_disable_confidence_head,
-                confidence_head_with_markov=True,
-                ce_loss_alpha=args.dspark_ce_loss_alpha,
-                l1_loss_alpha=args.dspark_l1_loss_alpha,
-                confidence_head_alpha=args.dspark_confidence_head_alpha,
-                loss_decay_gamma=args.dspark_loss_decay_gamma,
-                draft_loss_weight=args.dspark_draft_loss_weight,
-                hidden_size=config.hidden_size,
-                vocab_size=args.padded_vocab_size,
-                org_vocab_size=args.vocab_size,
-                num_attention_heads=config.num_attention_heads,
-                num_key_value_heads=getattr(config, "num_query_groups", config.num_attention_heads),
-                head_dim=getattr(config, "kv_channels", config.hidden_size // config.num_attention_heads),
-                rms_norm_eps=getattr(config, "layernorm_epsilon", 1e-6),
-                rotary_base=getattr(config, "rotary_base", 10000.0),
-                intermediate_size=getattr(args, "dspark_intermediate_size", 0),
-            )
-            # Get policy embedding and lm_head for weight sharing
-            # Megatron's LanguageModelEmbedding wraps the actual nn.Embedding
-            # in a 'word_embeddings' attribute; extract it so DSpark can access .weight
-            policy_embed = model.embedding
-            if hasattr(policy_embed, "word_embeddings"):
-                policy_embed = policy_embed.word_embeddings
-            # Megatron's output_layer (LinearCrossEntropyModule) may have weight=None
-            # when share_embeddings_and_output_weights=True (tied embeddings) and
-            # skip_weight_param_allocation=True. In that case the weight is shared
-            # with the embedding, so use policy_embed for both.
-            policy_lm_head = model.output_layer if hasattr(model, "output_layer") else None
-            if policy_lm_head is None or getattr(policy_lm_head, "weight", None) is None:
-                policy_lm_head = policy_embed
-            dspark_model = build_dspark_model(
-                dspark_config=dspark_config,
-                policy_embed_tokens=policy_embed,
-                policy_lm_head=policy_lm_head,
-                pretrained_model_path=getattr(args, "dspark_pretrained_model", None),
-            )
-            # Tag draft params for separate grad-norm group (following NeMo RL pattern)
-            for param in dspark_model.parameters():
-                param.grad_norm_group = "dspark"
-            model.draft_model = dspark_model
+            attach_dspark_model(model, args, config)
 
         return model
 

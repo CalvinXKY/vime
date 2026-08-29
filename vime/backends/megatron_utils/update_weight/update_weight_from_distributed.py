@@ -1,5 +1,6 @@
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 
 import ray
 import torch
@@ -34,7 +35,16 @@ class UpdateWeightFromDistributed:
             model_name=model_name,
             quantization_config=quantization_config,
         )
-        self._source = HfWeightSource(iterator, weights_getter)
+        draft_weights_getter = None
+        if self.args.dspark_enabled:
+            from vime.backends.megatron_utils.dspark.export import export_dspark_model_weights
+
+            draft_weights_getter = partial(
+                export_dspark_model_weights,
+                model,
+                use_policy_embedding=not self.args.dspark_pretrained_model,
+            )
+        self._source = HfWeightSource(iterator, weights_getter, draft_weights_getter)
         self._trainer = None
 
     def connect_rollout_engines(
@@ -90,9 +100,14 @@ class UpdateWeightFromDistributed:
         client = self._trainer.client
         client.draft = False
         self._trainer.send_weights()
-        if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
+        update_draft = self.args.dspark_enabled or (
+            self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
+        )
+        if update_draft:
+            self._source.draft = self.args.dspark_enabled
             client.draft = True
             self._trainer.send_weights()
+            self._source.draft = False
             client.draft = False
 
         if dist.get_rank() == 0:

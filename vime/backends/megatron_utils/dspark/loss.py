@@ -350,7 +350,24 @@ class DraftLossWrapper:
         return combined_loss, dspark_metrics
 
 
-__all__ = [
-    "compute_dspark_loss",
-    "DraftLossWrapper",
-]
+def build_combined_loss_fn(policy_loss_fn, args, batch, num_microbatches, global_batch_size, outputs, config):
+    wrapper = DraftLossWrapper(config)
+
+    def combined_loss_fn(logits):
+        if args.dspark_freeze_policy:
+            logits = logits.detach()
+        policy_loss, num_elems, metrics = policy_loss_fn(
+            args,
+            batch,
+            num_microbatches,
+            global_batch_size,
+            logits,
+        )
+        combined_loss, dspark_metrics = wrapper(policy_loss, outputs)
+        keys = list(dspark_metrics)
+        values = metrics["values"].new_tensor([dspark_metrics[key] for key in keys])
+        metrics["keys"] += keys
+        metrics["values"] = torch.cat((metrics["values"], values))
+        return combined_loss, num_elems, metrics
+
+    return combined_loss_fn
