@@ -28,6 +28,7 @@ try:
     from megatron.core.pipeline_parallel.utils import unwrap_model
 except ImportError:
     from megatron.core.utils import unwrap_model
+
 from vime.utils import logging_utils
 from vime.utils.memory_utils import clear_memory
 
@@ -593,9 +594,6 @@ def train_one_step(
                     "rollout_log_probs",
                     "teacher_log_probs",
                     "rollout_mask_sums",
-                    # Only present when dumping train debug data; lets the loss
-                    # snapshot each sample's log_probs keyed by rollout position.
-                    *(["partition"] if args.save_debug_train_data is not None else []),
                 ],
             ),
             args.data_pad_size_multiplier,
@@ -627,8 +625,9 @@ def train_one_step(
                 "loss_mask": batch["full_loss_masks"],
             }
 
-            # MCore MambaModel.forward does not accept loss_mask; masking is
-            # applied by the loss function instead.
+            # vime-patch: mcore MambaModel.forward (hybrid NemotronH) has no
+            # loss_mask kwarg (GPTModel does). Drop it when unsupported; loss
+            # masking happens in vime's own loss fn, not the model.
             _m = model
             while hasattr(_m, "module"):
                 _m = _m.module
@@ -648,35 +647,98 @@ def train_one_step(
             if args.enable_mtp_training:
                 forward_kwargs["mtp_kwargs"] = {"mtp_labels": batch["tokens"]}
 
+            # DSpark: wrap policy forward with hidden state capture
+            dspark_capture = None
             dspark_outputs = None
-            dspark_config = None
-            if args.dspark_enabled:
-                from vime.backends.megatron_utils.dspark.hidden_capture import forward_with_dspark
+            if getattr(args, "dspark_enabled", False):
+                from vime.backends.megatron_utils.dspark.hidden_capture import get_capture_context
 
-                output_tensor, dspark_outputs, dspark_config = forward_with_dspark(
-                    model,
-                    forward_kwargs,
-                    batch,
-                    args.dspark_target_layer_ids,
+                target_layer_ids = tuple(int(x) for x in args.dspark_target_layer_ids.split(","))
+                capture_ctx, dspark_capture = get_capture_context(
+                    model=model,
+                    target_layer_ids=target_layer_ids,
+                    enabled=True,
                 )
+                with capture_ctx:
+                    output_tensor = model(**forward_kwargs)
+                # Run DSpark draft forward
+                if dspark_capture is not None:
+                    captured = dspark_capture.get_captured_states()
+                    from megatron.core.utils import unwrap_model
+
+                    _unwrapped = unwrap_model(model)
+                    dspark_model = getattr(_unwrapped, "draft_model", None)
+                    if dspark_model is not None and captured.target_hidden_states is not None:
+                        loss_mask = batch.get("full_loss_masks", batch.get("loss_masks", None))
+                        if loss_mask is not None:
+                            # Megatron hidden states are [seq_len, bsz, hidden];
+                            # DSpark expects [bsz, seq_len, hidden].
+                            tgt_hidden = captured.target_hidden_states
+                            if tgt_hidden.shape[0] == loss_mask.shape[1] and tgt_hidden.shape[1] == loss_mask.shape[0]:
+                                tgt_hidden = tgt_hidden.transpose(0, 1).contiguous()
+                            tgt_last_hidden = captured.target_last_hidden_states
+                            if (
+                                tgt_last_hidden is not None
+                                and tgt_last_hidden.shape[0] == loss_mask.shape[1]
+                                and tgt_last_hidden.shape[1] == loss_mask.shape[0]
+                            ):
+                                tgt_last_hidden = tgt_last_hidden.transpose(0, 1).contiguous()
+                            dspark_outputs = dspark_model(
+                                input_ids=batch["tokens"],
+                                target_hidden_states=tgt_hidden,
+                                loss_mask=loss_mask,
+                                target_last_hidden_states=tgt_last_hidden,
+                            )
             else:
                 output_tensor = model(**forward_kwargs)
 
         if os.environ.get("ENABLE_ROUTING_REPLAY", "0") == "1":
             os.environ["ROUTING_REPLAY_STAGE"] = old_stage
 
+        # Wrap loss_function with DSpark draft loss if enabled
         if dspark_outputs is not None:
-            from vime.backends.megatron_utils.dspark.loss import build_combined_loss_fn
+            from vime.backends.megatron_utils.dspark.common import DSparkConfig
+            from vime.backends.megatron_utils.dspark.loss import DraftLossWrapper
 
-            return output_tensor, build_combined_loss_fn(
-                loss_function,
-                args,
-                batch,
-                num_microbatches,
-                step_global_batch_size,
-                dspark_outputs,
-                dspark_config,
+            dspark_config = DSparkConfig(
+                ce_loss_alpha=args.dspark_ce_loss_alpha,
+                l1_loss_alpha=args.dspark_l1_loss_alpha,
+                confidence_head_alpha=args.dspark_confidence_head_alpha,
+                loss_decay_gamma=args.dspark_loss_decay_gamma,
+                draft_loss_weight=args.dspark_draft_loss_weight,
             )
+            draft_wrapper = DraftLossWrapper(dspark_config)
+
+            def combined_loss_fn(
+                logits,
+                _args=args,
+                _batch=batch,
+                _num_mb=num_microbatches,
+                _sgbs=step_global_batch_size,
+                _dspark_outputs=dspark_outputs,
+                _draft_wrapper=draft_wrapper,
+            ):
+                # When dspark_freeze_policy is enabled, detach logits to prevent
+                # ANY gradient from flowing to the policy model. The policy model
+                # stays frozen, and only the DSpark draft model is trained.
+                if getattr(_args, "dspark_freeze_policy", False):
+                    logits = logits.detach()
+                policy_loss, num_elems, metrics = loss_function(_args, _batch, _num_mb, _sgbs, logits)
+                combined, dspark_metrics = _draft_wrapper(policy_loss, _dspark_outputs)
+                # Pack dspark metrics into Megatron's keys/values format
+                # (loss_function returns {"keys": [...], "values": tensor},
+                #  but dspark_metrics returns {key: float})
+                dspark_keys = list(dspark_metrics.keys())
+                dspark_vals = torch.tensor(
+                    [float(dspark_metrics[k]) for k in dspark_keys],
+                    device=metrics["values"].device,
+                    dtype=metrics["values"].dtype,
+                )
+                metrics["keys"] = metrics["keys"] + dspark_keys
+                metrics["values"] = torch.cat([metrics["values"], dspark_vals])
+                return combined, num_elems, metrics
+
+            return output_tensor, partial(combined_loss_fn)
         return output_tensor, partial(loss_function, args, batch, num_microbatches, step_global_batch_size)
 
     # Forward pass.
@@ -896,15 +958,15 @@ def train(
                     torch.distributed.all_reduce(values, group=tracker.get("reduce_group"))
                 if tracker.get("avg_group") is not None:
                     torch.distributed.all_reduce(values, group=tracker["avg_group"], op=torch.distributed.ReduceOp.AVG)
-                # Multi-head MTP: tracker["values"] is [num_mtp_layers]; aggregate below.
-                mtp_losses = tracker["values"] * mtp_loss_scale
+                # here we assume only one mtp layer
+                mtp_losses = (tracker["values"] * mtp_loss_scale).item()
                 MTPLossLoggingHelper.clean_loss_in_tracker()
 
                 # CI check: verify MTP loss is within expected bounds
                 if args.ci_test:
                     from vime.backends.megatron_utils.ci_utils import check_mtp_loss
 
-                    check_mtp_loss(mtp_losses.sum().item())
+                    check_mtp_loss(mtp_losses)
 
         # per train step log.
         if (
@@ -921,9 +983,7 @@ def train(
             }
             log_dict[f"train/{role_tag}grad_norm"] = grad_norm
             if args.enable_mtp_training:
-                for _i in range(mtp_losses.shape[0]):
-                    log_dict[f"train/{role_tag}mtp_{_i + 1}_loss"] = mtp_losses[_i].item()
-                log_dict[f"train/{role_tag}mtp_loss"] = mtp_losses.sum().item()
+                log_dict[f"train/{role_tag}mtp_loss"] = mtp_losses
 
             for param_group_id, param_group in enumerate(optimizer.param_groups):
                 log_dict[f"train/{role_tag}lr-pg_{param_group_id}"] = opt_param_scheduler.get_lr(param_group)
@@ -934,8 +994,7 @@ def train(
             logging_utils.log(args, log_dict, step_key="train/step")
 
             if args.ci_test and "train/train_rollout_logprob_abs_diff" in log_dict:
-                threshold = args.ci_train_rollout_logprob_abs_diff_threshold
-                assert log_dict["train/train_rollout_logprob_abs_diff"] <= threshold, f"{threshold=} {log_dict=}"
+                assert log_dict["train/train_rollout_logprob_abs_diff"] <= 0.1, f"{log_dict=}"
 
             if args.ci_test and not args.ci_disable_kl_checker:
                 if step_id == 0 and "train/ppo_kl" in log_dict and "train/pg_clipfrac" in log_dict:
@@ -1030,7 +1089,7 @@ def initialize_model_and_optimizer(
         from vime.utils.rocm_checkpoint_writer import ROCmFileSystemWriterAsync
 
         filesystem_async_module.FileSystemWriterAsync = ROCmFileSystemWriterAsync
-        print("[ROCm] Applied FileSystemWriterAsync patch for HIP compatibility")
+        logger.info("[ROCm] Applied FileSystemWriterAsync patch for HIP compatibility")
 
     model, optimizer, opt_param_scheduler = setup_model_and_optimizer(args, role)
     model[0].role = role

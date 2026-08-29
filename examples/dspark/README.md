@@ -44,6 +44,7 @@ hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/dapo-ma
 
 | Argument | Description |
 |----------|-------------|
+| `--dspark-enabled` | Enable DSpark draft model online training. Required. |
 | `--dspark-pretrained-model` | Path to pre-trained DSpark safetensors. Strongly recommended. |
 | `--dspark-block-size` | Number of draft tokens per block (default: 7). |
 | `--dspark-num-draft-layers` | Number of decoder layers in the draft backbone (default: 5). |
@@ -52,7 +53,7 @@ hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/dapo-ma
 | `--dspark-ce-loss-alpha` | Weight for cross-entropy loss (default: 0.1). |
 | `--dspark-l1-loss-alpha` | Weight for L1/TV loss (default: 0.9). |
 | `--dspark-draft-loss-weight` | Weight multiplying draft loss added to policy loss (default: 1.0). |
-| `--vllm-speculative-config` | JSON config passed to vLLM. Setting `method: "dspark"` also enables DSpark draft training. |
+| `--vllm-speculative-config` | JSON config passed to vLLM. Must set `method: "dspark"`. |
 
 ## Mode Comparison
 
@@ -119,8 +120,10 @@ On Qwen3-4B with 8x A800 GPUs and a pre-trained DSpark draft checkpoint:
    affecting the policy.
 
 3. **How are draft weights synced to vLLM?**
-   Through vLLM's standard draft weight-update session: colocated engines use
-   IPC and non-colocated engines use NCCL.
+   - **Colocate**: Draft weights are cached on CPU during `pause()`, then synced
+     to vLLM via direct IPC after `resume()`.
+   - **Non-colocate**: Draft weights are packed and transferred via NCCL to the
+     rollout engines.
 
 4. **What is `--dspark-block-size`?**
    The number of tokens the draft model predicts in parallel per block. Larger

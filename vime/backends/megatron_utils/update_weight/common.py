@@ -255,31 +255,19 @@ def _named_params_and_buffers_global(
 
 
 class HfWeightSource:
-    def __init__(
-        self,
-        iterator,
-        weights_getter: Callable[[], Mapping[str, torch.Tensor]],
-        draft_weights_getter: Callable[[], Sequence[tuple[str, torch.Tensor]]] | None = None,
-    ) -> None:
+    def __init__(self, iterator, weights_getter: Callable[[], Mapping[str, torch.Tensor]]) -> None:
         self.iterator = iterator
         self.weights_getter = weights_getter
-        self.draft_weights_getter = draft_weights_getter
-        self.draft = False
-        self._metadata = {}
+        self._metadata = None
 
     def metadata(self):
-        if self.draft not in self._metadata:
+        if self._metadata is None:
             from vllm.distributed.weight_transfer.base import ParamMeta
 
-            self._metadata[self.draft] = [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self]
-        return self._metadata[self.draft]
+            self._metadata = [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self]
+        return self._metadata
 
     def __iter__(self):
-        if self.draft:
-            if self.draft_weights_getter is None:
-                raise RuntimeError("Draft weight update requested without a draft weight source")
-            yield from self.draft_weights_getter()
-            return
         for chunk in self.iterator.get_hf_weight_chunks(self.weights_getter()):
             yield from chunk
 

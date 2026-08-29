@@ -1,8 +1,10 @@
 from __future__ import annotations
+import logging
+import os
+
 from argparse import Namespace
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from functools import partial
 from typing import Any
 
 import ray
@@ -14,6 +16,8 @@ from ray.actor import ActorHandle
 from tqdm import tqdm
 
 from vime.utils.distributed_utils import get_gloo_group
+
+logger = logging.getLogger(__name__)
 from vime.utils.types import ParamInfo
 
 from ..megatron_to_hf import convert_to_hf
@@ -113,22 +117,17 @@ class UpdateWeightFromTensor:
             tuple(tuple(bucket) for bucket in param_info_buckets) if param_info_buckets is not None else None
         )
         self._non_expert_param_info_buckets: list[list[ParamInfo]] | None = None
-        draft_weights_getter = None
-        if self.args.dspark_enabled:
-            from vime.backends.megatron_utils.dspark.export import export_dspark_model_weights
-
-            draft_weights_getter = partial(
-                export_dspark_model_weights,
-                self.model,
-                use_policy_embedding=not self.args.dspark_pretrained_model,
-            )
-        self._source = HfWeightSource(self._hf_weight_iterator, self.weights_getter, draft_weights_getter)
+        self._source = HfWeightSource(self._hf_weight_iterator, self.weights_getter)
 
         self._ipc_gather_group = None
         self._ipc_gather_src = None
         self._ipc_engine = None
         self._expert_transfer_plan = []
         self._native_trainers = []
+
+        # DSpark draft weights cached to CPU before torch_memory_saver.pause(),
+        # consumed by update_weights() after the model has been offloaded.
+        self._dspark_draft_cpu_cache: list[tuple[str, torch.Tensor]] | None = None
 
     def connect_rollout_engines(
         self,
@@ -216,6 +215,35 @@ class UpdateWeightFromTensor:
                 )
                 self._native_trainers.append(trainer)
 
+            # DSpark: Set _ipc_engine and _ipc_gather_src for non-MoE models.
+            # This is needed for cache_dspark_draft_weights() and
+            # _sync_dspark_draft_weights_direct() to work. Without this,
+            # draft model weights are never synced to vLLM (spec_accept_rate=0%).
+            if self._ipc_gather_group is None:
+                for index in range(colocate_engine_nums):
+                    group_ranks = list(
+                        range(
+                            colocate_gpu_offsets[index],
+                            colocate_gpu_offsets[index] + colocate_gpu_counts[index],
+                        )
+                    )
+                    new_group = dist.new_group(ranks=group_ranks, backend="gloo")
+                    if dist.get_rank() in group_ranks:
+                        self._ipc_gather_group = new_group
+                        self._ipc_gather_src = colocate_gpu_offsets[index]
+
+            for index, engine in enumerate(self.rollout_engines):
+                start = colocate_gpu_offsets[index]
+                if start <= dist.get_rank() < start + colocate_gpu_counts[index]:
+                    self._ipc_engine = engine
+
+            if dist.get_rank() == 0:
+                ray.get(
+                    [
+                        engine.init_weight_transfer_engine.remote({"init_info": {"packed": True}})
+                        for engine in self.rollout_engines
+                    ]
+                )
             return
 
         # Rank-local expert routing is the one case the generic IPC API cannot
@@ -354,22 +382,26 @@ class UpdateWeightFromTensor:
             for trainer in self._native_trainers:
                 trainer.client.draft = False
                 trainer.send_weights()
-            update_draft = self.args.dspark_enabled or (
-                self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
-            )
-            if update_draft:
-                self._source.draft = self.args.dspark_enabled
+            if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
                 for trainer in self._native_trainers:
                     trainer.client.draft = True
                     trainer.send_weights()
                     trainer.client.draft = False
-                self._source.draft = False
         else:
             megatron_local_weights = self.weights_getter()
             self._update_rollout_weights(megatron_local_weights, draft=False)
 
             if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
                 self._update_rollout_weights(megatron_local_weights, draft=True)
+
+        # DSpark draft weight sync: send pre-exported CPU weights to vLLM.
+        dspark_draft_cpu_weights = getattr(self, "_dspark_draft_cpu_cache", None)
+        if dspark_draft_cpu_weights is not None:
+            logger.info(f"[DSpark] Using cached draft weights ({len(dspark_draft_cpu_weights)} tensors)")
+        self._dspark_draft_cpu_cache = None  # consume the cache
+
+        if dspark_draft_cpu_weights is not None:
+            self._sync_dspark_draft_weights_direct(dspark_draft_cpu_weights)
 
         # int4/fp4 post_process
         if self.rank == 0:
@@ -412,6 +444,167 @@ class UpdateWeightFromTensor:
             torch.cuda.empty_cache()
         if self._expert_transfer_plan:
             self._update_expert_weights(megatron_local_weights)
+
+    @torch.no_grad()
+    def cache_dspark_draft_weights(self) -> None:
+        """Export DSpark draft weights to CPU and cache for later use.
+
+        MUST be called BEFORE torch_memory_saver.pause() (i.e., before
+        ``actor.sleep()``), while the model is still on GPU.
+        """
+        if not (
+            getattr(self.args, "dspark_enabled", False)
+            and (self.args.vllm_speculative_config or {}).get("method") == "dspark"
+        ):
+            return
+
+        if self._ipc_engine is None or getattr(self, "use_distribute", False):
+            self._dspark_draft_cpu_cache = None
+            return
+
+        from vime.backends.megatron_utils.dspark.export import (
+            export_dspark_weights_to_hf,
+            get_dspark_model_from_policy_chunk,
+            get_policy_chunk_with_draft,
+        )
+
+        rank = dist.get_rank()
+        if rank != self._ipc_gather_src:
+            self._dspark_draft_cpu_cache = None
+            return
+
+        draft_model = get_dspark_model_from_policy_chunk(self.model)
+        if draft_model is None:
+            logger.warning("[DSpark] draft_model is None, skipping draft weight sync")
+            self._dspark_draft_cpu_cache = None
+            return
+
+        policy_chunk = get_policy_chunk_with_draft(self.model)
+        _use_policy_embed = not getattr(self.args, "dspark_pretrained_model", None)
+        draft_named_tensors = export_dspark_weights_to_hf(
+            draft_model=draft_model,
+            policy_model=policy_chunk if _use_policy_embed else None,
+        )
+
+        if not draft_named_tensors:
+            logger.warning("[DSpark] draft_named_tensors is empty, skipping draft weight sync")
+            self._dspark_draft_cpu_cache = None
+            return
+
+        total_bytes = sum(t.numel() * t.element_size() for _, t in draft_named_tensors)
+        logger.info(
+            f"[DSpark] Caching draft weights: {len(draft_named_tensors)} tensors, "
+            f"{total_bytes / 1024 / 1024:.1f} MB -> CPU"
+        )
+
+        torch.cuda.synchronize()
+
+        cpu_weights = []
+        for name, t in draft_named_tensors:
+            cpu_t = t.detach().to("cpu", copy=True)
+            cpu_weights.append((name, cpu_t))
+        logger.info(f"[DSpark] Draft weight cache ready ({len(cpu_weights)} tensors)")
+        self._dspark_draft_cpu_cache = cpu_weights
+
+    @torch.no_grad()
+    def _sync_dspark_draft_weights_direct(self, cpu_weights: list[tuple[str, torch.Tensor]]) -> None:
+        """Send pre-exported CPU draft weights to vLLM via file-based transfer."""
+        import tempfile
+
+        rank = dist.get_rank()
+        if self._ipc_engine is None or rank != self._ipc_gather_src:
+            dist.barrier(group=get_gloo_group())
+            return
+
+        total_bytes = sum(t.numel() * t.element_size() for _, t in cpu_weights)
+        logger.info(f"[DSpark] Direct sync: {len(cpu_weights)} tensors, " f"{total_bytes / 1024 / 1024:.1f} MB")
+
+        weight_dict = {name: t for name, t in cpu_weights}
+        tmp_path = tempfile.mktemp(suffix=".pt", prefix="dspark_draft_")
+        torch.save(weight_dict, tmp_path)
+        logger.info(f"[DSpark] Saved draft weights to {tmp_path}")
+
+        ray.get(
+            self._ipc_engine.load_draft_weights_from_file.remote(
+                file_path=tmp_path,
+            )
+        )
+        logger.info("[DSpark] Draft weight direct sync completed")
+
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+        dist.barrier(group=get_gloo_group())
+
+    @torch.no_grad()
+    def _send_dspark_draft_weights(self) -> None:
+        """Export DSpark draft weights and send to vLLM via IPC."""
+        from vime.backends.megatron_utils.dspark.export import (
+            export_dspark_weights_to_hf,
+            get_dspark_model_from_policy_chunk,
+            get_policy_chunk_with_draft,
+        )
+
+        draft_model = get_dspark_model_from_policy_chunk(self.model)
+        if draft_model is None:
+            logger.warning("[DSpark] draft_model is None, skipping draft weight sync")
+            return
+
+        policy_chunk = get_policy_chunk_with_draft(self.model)
+        _use_policy_embed = not getattr(self.args, "dspark_pretrained_model", None)
+        draft_named_tensors = export_dspark_weights_to_hf(
+            draft_model=draft_model,
+            policy_model=policy_chunk if _use_policy_embed else None,
+        )
+
+        if not draft_named_tensors:
+            logger.warning("[DSpark] draft_named_tensors is empty, skipping draft weight sync")
+            return
+
+        total_bytes = sum(t.numel() * t.element_size() for _, t in draft_named_tensors)
+        logger.info(
+            f"[DSpark] Sending {len(draft_named_tensors)} draft weight tensors "
+            f"({total_bytes / 1024 / 1024:.1f} MB) to vLLM"
+        )
+
+        _MAX_CHUNK_BYTES = 512 * 1024 * 1024
+        max_inflight = 1
+        pending = []
+
+        chunk: list[tuple[str, torch.Tensor]] = []
+        chunk_bytes = 0
+        for name, tensor in draft_named_tensors:
+            tensor_bytes = tensor.numel() * tensor.element_size()
+            if chunk and chunk_bytes + tensor_bytes > _MAX_CHUNK_BYTES:
+                refs, weight_refs = self._send_hf_params(chunk)
+                pending.append((refs, weight_refs))
+                if len(pending) >= max_inflight:
+                    self._drain_ipc_updates(pending)
+                chunk = []
+                chunk_bytes = 0
+            chunk.append((name, tensor))
+            chunk_bytes += tensor_bytes
+
+        if chunk:
+            refs, weight_refs = self._send_hf_params(chunk)
+            pending.append((refs, weight_refs))
+
+        self._drain_ipc_updates(pending)
+        logger.info("[DSpark] Draft weight sync completed")
+
+    def _drain_ipc_updates(self, pending) -> None:
+        if not pending:
+            return
+        ray.get([ref for refs, _ in pending for ref in refs])
+        if self._ipc_gather_group is not None:
+            dist.barrier(group=self._ipc_gather_group)
+        import gc
+
+        pending.clear()
+        gc.collect()
+        torch.cuda.synchronize()
 
     def _send_hf_params(self, hf_named_tensors) -> tuple[list[ObjectRef], Any]:
         return _send_to_colocated_engine(

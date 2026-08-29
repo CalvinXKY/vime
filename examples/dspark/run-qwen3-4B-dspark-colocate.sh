@@ -34,7 +34,7 @@ CKPT_ARGS=(
    --hf-checkpoint "${MODEL_DIR}"
    --ref-load "${MODEL_DIR}_torch_dist"
    --save "${SAVE_DIR}"
-   --save-interval "${SAVE_INTERVAL:-50}"
+   --save-interval 50
 )
 
 ROLLOUT_ARGS=(
@@ -44,13 +44,13 @@ ROLLOUT_ARGS=(
    --apply-chat-template
    --rollout-shuffle
    --rm-type deepscaler
-   --num-rollout "${NUM_ROLLOUT:-200}"
-   --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-32}"
-   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-8}"
-   --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN:-4096}"
+   --num-rollout 200
+   --rollout-batch-size 32
+   --n-samples-per-prompt 8
+   --rollout-max-response-len 4096
    --rollout-temperature 1
 
-   --global-batch-size "${GLOBAL_BATCH_SIZE:-256}"
+   --global-batch-size 256
    --balance-data
 )
 
@@ -66,7 +66,7 @@ PERF_ARGS=(
    --recompute-num-layers 1
 
    --use-dynamic-batch-size
-   --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-8192}"
+   --max-tokens-per-gpu 8192
 )
 
 GRPO_ARGS=(
@@ -95,6 +95,7 @@ VLLM_ARGS=(
 )
 
 DSPARK_ARGS=(
+   --dspark-enabled
    --dspark-block-size 7
    --dspark-num-draft-layers 5
    --dspark-target-layer-ids 1,9,17,25,33

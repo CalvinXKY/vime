@@ -217,3 +217,11 @@ def build_markov_head(config) -> nn.Module | None:
             hidden_size=config.hidden_size,
         )
     raise ValueError(f"Unsupported markov_head_type: {markov_head_type!r}")
+
+
+__all__ = [
+    "VanillaMarkov",
+    "GatedMarkovHead",
+    "RNNHead",
+    "build_markov_head",
+]

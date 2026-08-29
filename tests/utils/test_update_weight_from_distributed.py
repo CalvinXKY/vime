@@ -79,17 +79,14 @@ class RecordingEngine:
 
 
 class RecordingTrainer:
-    def __init__(self, client, *, source=None, fail=False):
+    def __init__(self, client, *, fail=False):
         self.client = client
-        self.source = source
         self.fail = fail
         self.draft_states = []
-        self.source_draft_states = []
         self.shutdown_calls = 0
 
     def send_weights(self):
         self.draft_states.append(self.client.draft)
-        self.source_draft_states.append(getattr(self.source, "draft", False))
         self.client.start_weight_update()
         if self.fail:
             raise RuntimeError("transfer failed")
@@ -157,34 +154,6 @@ def test_weight_source_caches_metadata_and_reiterates(update_module, monkeypatch
 
 
 @pytest.mark.unit
-def test_weight_source_switches_to_draft_weights(update_module, monkeypatch):
-    class ParamMeta:
-        def __init__(self, name, dtype, shape):
-            self.name = name
-            self.dtype = dtype
-            self.shape = shape
-
-    base_module = types.ModuleType("vllm.distributed.weight_transfer.base")
-    base_module.ParamMeta = ParamMeta
-    monkeypatch.setitem(sys.modules, "vllm.distributed.weight_transfer.base", base_module)
-
-    class Iterator:
-        def get_hf_weight_chunks(self, weights):
-            yield [("policy", weights["policy"])]
-
-    source = update_module.HfWeightSource(
-        Iterator(),
-        lambda: {"policy": torch.zeros(1)},
-        lambda: [("draft", torch.ones(2))],
-    )
-
-    assert [name for name, _ in source] == ["policy"]
-    source.draft = True
-    assert [item.name for item in source.metadata()] == ["draft"]
-    assert [name for name, _ in source] == ["draft"]
-
-
-@pytest.mark.unit
 def test_nccl_trainer_uses_single_packed_buffer(update_module, monkeypatch):
     adapter = sys.modules[update_module.create_nccl_trainer.__module__]
     created = []
@@ -246,20 +215,18 @@ def test_connect_replaces_existing_trainer(update_module, monkeypatch):
     assert updater._trainer is not old_trainer
 
 
-def _updater_for_transfer(update_module, *, mtp=False, dspark=False, fail=False):
+def _updater_for_transfer(update_module, *, mtp=False, fail=False):
     updater = object.__new__(update_module.UpdateWeightFromDistributed)
     updater.args = types.SimpleNamespace(
         enable_mtp_training=mtp,
-        dspark_enabled=dspark,
-        vllm_speculative_config={"method": "mtp"} if mtp else {"method": "dspark"} if dspark else None,
+        vllm_speculative_config={"method": "mtp"} if mtp else None,
     )
     updater.quantization_config = None
     updater.weight_version = 0
     updater.update_weight_metrics = {}
     updater.rollout_engines = [RecordingEngine()]
     client = update_module.VimeRayWeightSyncClient(updater.rollout_engines, lambda: updater.weight_version)
-    updater._source = types.SimpleNamespace(draft=False)
-    updater._trainer = RecordingTrainer(client, source=updater._source, fail=fail)
+    updater._trainer = RecordingTrainer(client, fail=fail)
     return updater
 
 
@@ -279,21 +246,6 @@ def test_update_uses_native_main_and_draft_lifecycles(update_module, monkeypatch
     assert len(engine.start_draft_weight_update.calls) == 1
     assert len(engine.finish_weight_update.calls) == 2
     assert len(engine.continue_generation.calls) == 1
-
-
-@pytest.mark.unit
-def test_dspark_update_uses_nccl_draft_lifecycle(update_module, monkeypatch):
-    updater = _updater_for_transfer(update_module, dspark=True)
-    monkeypatch.setattr(update_module.dist, "get_rank", lambda: 0)
-    monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
-
-    updater.update_weights()
-
-    engine = updater.rollout_engines[0]
-    assert updater._trainer.draft_states == [False, True]
-    assert updater._trainer.source_draft_states == [False, True]
-    assert updater._source.draft is False
-    assert len(engine.start_draft_weight_update.calls) == 1
 
 
 @pytest.mark.unit

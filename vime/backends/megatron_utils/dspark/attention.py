@@ -11,8 +11,11 @@ draft hidden states AND the target (policy) hidden states, then concatenated:
 This dual-input K/V is the core architectural feature of DSpark that enables
 the draft model to attend to the policy's intermediate representations.
 
-The draft model is replicated on every TP rank and uses plain ``nn.Linear``
-plus SDPA because Megatron TE attention does not support dual-input K/V.
+TP=1 implementation note:
+    Phase 1 uses plain ``nn.Linear`` + ``scaled_dot_product_attention`` (SDPA)
+    with an explicit boolean mask. This avoids Megatron TE's fused attention,
+    which does not support the dual-input K/V pattern. TP>1 support is deferred
+    to Phase 3+ and will require custom K/V partitioning.
 """
 
 import torch
@@ -96,8 +99,9 @@ class DSparkParallelAttention(nn.Module):
     ``target_hidden_states`` (policy), then concatenated along the sequence
     dimension. Q is computed from ``hidden_states`` only.
 
-    The projections are intentionally unsharded because the complete draft
-    model runs on every TP rank.
+    This module is TP-agnostic in Phase 1 (TP=1): all projections are plain
+    ``nn.Linear``. TP>1 will require partitioning q/k/v projections and
+    handling the concatenated K/V across TP ranks (deferred).
     """
 
     def __init__(
@@ -201,3 +205,11 @@ class DSparkParallelAttention(nn.Module):
             attn_output.transpose(1, 2).contiguous().view(bsz, q_len, self.num_attention_heads * self.head_dim)
         )
         return self.o_proj(attn_output)
+
+
+__all__ = [
+    "DSparkParallelAttention",
+    "DSparkRotaryEmbedding",
+    "apply_rotary_pos_emb",
+    "rotate_half",
+]
