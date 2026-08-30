@@ -648,11 +648,35 @@ def train_one_step(
             if args.enable_mtp_training:
                 forward_kwargs["mtp_kwargs"] = {"mtp_labels": batch["tokens"]}
 
-            output_tensor = model(**forward_kwargs)
+            dspark_outputs = None
+            dspark_config = None
+            if args.dspark_enabled:
+                from vime.backends.megatron_utils.dspark.hidden_capture import forward_with_dspark
+
+                output_tensor, dspark_outputs, dspark_config = forward_with_dspark(
+                    model,
+                    forward_kwargs,
+                    batch,
+                    args.dspark_target_layer_ids,
+                )
+            else:
+                output_tensor = model(**forward_kwargs)
 
         if os.environ.get("ENABLE_ROUTING_REPLAY", "0") == "1":
             os.environ["ROUTING_REPLAY_STAGE"] = old_stage
 
+        if dspark_outputs is not None:
+            from vime.backends.megatron_utils.dspark.loss import build_combined_loss_fn
+
+            return output_tensor, build_combined_loss_fn(
+                loss_function,
+                args,
+                batch,
+                num_microbatches,
+                step_global_batch_size,
+                dspark_outputs,
+                dspark_config,
+            )
         return output_tensor, partial(loss_function, args, batch, num_microbatches, step_global_batch_size)
 
     # Forward pass.

@@ -1,8 +1,8 @@
 from __future__ import annotations
-
 from argparse import Namespace
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from typing import Any
 
 import ray
@@ -16,6 +16,7 @@ from tqdm import tqdm
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
 
+from ..dspark.export import export_dspark_model_weights
 from ..megatron_to_hf import convert_to_hf
 from .common import HfWeightSource, VimeRayWeightSyncClient, create_nccl_trainer
 from .expert_routing import configure_expert_routing
@@ -113,7 +114,16 @@ class UpdateWeightFromTensor:
             tuple(tuple(bucket) for bucket in param_info_buckets) if param_info_buckets is not None else None
         )
         self._non_expert_param_info_buckets: list[list[ParamInfo]] | None = None
-        self._source = HfWeightSource(self._hf_weight_iterator, self.weights_getter)
+        draft_weights_getter = (
+            partial(
+                export_dspark_model_weights,
+                self.model,
+                use_policy_embedding=not self.args.dspark_pretrained_model,
+            )
+            if self.args.dspark_enabled
+            else None
+        )
+        self._source = HfWeightSource(self._hf_weight_iterator, self.weights_getter, draft_weights_getter)
 
         self._ipc_gather_group = None
         self._ipc_gather_src = None
@@ -206,6 +216,7 @@ class UpdateWeightFromTensor:
                     distributed_gpu_counts,
                 )
                 self._native_trainers.append(trainer)
+
             return
 
         # Rank-local expert routing is the one case the generic IPC API cannot
@@ -344,11 +355,16 @@ class UpdateWeightFromTensor:
             for trainer in self._native_trainers:
                 trainer.client.draft = False
                 trainer.send_weights()
-            if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
+            update_draft = self.args.dspark_enabled or (
+                self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
+            )
+            if update_draft:
+                self._source.draft = self.args.dspark_enabled
                 for trainer in self._native_trainers:
                     trainer.client.draft = True
                     trainer.send_weights()
                     trainer.client.draft = False
+                self._source.draft = False
         else:
             megatron_local_weights = self.weights_getter()
             self._update_rollout_weights(megatron_local_weights, draft=False)

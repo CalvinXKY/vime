@@ -1,5 +1,6 @@
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 
 import ray
 import torch
@@ -8,6 +9,7 @@ from ray.actor import ActorHandle
 
 from vime.utils.distributed_utils import get_gloo_group
 
+from ..dspark.export import export_dspark_model_weights
 from .common import HfWeightSource, VimeRayWeightSyncClient, create_nccl_trainer
 from .hf_weight_iterator_base import HfWeightIteratorBase
 
@@ -34,7 +36,16 @@ class UpdateWeightFromDistributed:
             model_name=model_name,
             quantization_config=quantization_config,
         )
-        self._source = HfWeightSource(iterator, weights_getter)
+        draft_weights_getter = (
+            partial(
+                export_dspark_model_weights,
+                model,
+                use_policy_embedding=not self.args.dspark_pretrained_model,
+            )
+            if self.args.dspark_enabled
+            else None
+        )
+        self._source = HfWeightSource(iterator, weights_getter, draft_weights_getter)
         self._trainer = None
 
     def connect_rollout_engines(
@@ -90,9 +101,14 @@ class UpdateWeightFromDistributed:
         client = self._trainer.client
         client.draft = False
         self._trainer.send_weights()
-        if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
+        update_draft = self.args.dspark_enabled or (
+            self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
+        )
+        if update_draft:
+            self._source.draft = self.args.dspark_enabled
             client.draft = True
             self._trainer.send_weights()
+            self._source.draft = False
             client.draft = False
 
         if dist.get_rank() == 0:

@@ -170,6 +170,7 @@ def _get_model_provider_func(
                         qk_layernorm=args.qk_layernorm,
                         multi_latent_attention=args.multi_latent_attention,
                         moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
+                        normalization=args.normalization,
                     )
                 else:
                     transformer_layer_spec = get_gpt_layer_local_spec(
@@ -178,6 +179,7 @@ def _get_model_provider_func(
                         qk_layernorm=args.qk_layernorm,
                         multi_latent_attention=args.multi_latent_attention,
                         moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
+                        normalization=args.normalization,
                     )
 
         build_model_context = nullcontext
@@ -233,6 +235,11 @@ def _get_model_provider_func(
 
         if post_process and role == "critic":
             model.output_layer = LinearForLastLayer(input_size=config.hidden_size, output_size=1, config=config)
+
+        if args.dspark_enabled and role == "actor" and post_process:
+            from vime.backends.megatron_utils.dspark.modeling import attach_dspark_model
+
+            attach_dspark_model(model, args, config)
 
         return model
 

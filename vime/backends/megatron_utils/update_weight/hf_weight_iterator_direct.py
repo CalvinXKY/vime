@@ -205,6 +205,9 @@ def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Mo
     param_infos = {}
     rank = dist.get_rank()
     for name, param in named_params_and_buffers(args, model):
+        # DSpark draft params are sent through the draft weight source.
+        if ".draft_model." in name:
+            continue
         param_infos[name] = ParamInfo(
             name=name,
             dtype=param.dtype,

@@ -1537,6 +1537,112 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
 
             return parser
 
+        def add_dspark_training_arguments(parser):
+            """Add DSpark (semi-autoregressive speculative decoding) training arguments."""
+            parser.add_argument(
+                "--dspark-block-size",
+                type=int,
+                default=7,
+                help="Number of draft tokens per block (parallel prediction width).",
+            )
+            parser.add_argument(
+                "--dspark-num-draft-layers",
+                type=int,
+                default=5,
+                help="Number of decoder layers in the DSpark draft backbone.",
+            )
+            parser.add_argument(
+                "--dspark-target-layer-ids",
+                type=lambda value: tuple(int(layer_id) for layer_id in value.split(",")),
+                default=(1, 9, 17, 25, 33),
+                help="Comma-separated policy layer indices to capture hidden states from.",
+            )
+            parser.add_argument(
+                "--dspark-markov-rank",
+                type=int,
+                default=256,
+                help="Markov head embedding rank (0 to disable Markov head).",
+            )
+            parser.add_argument(
+                "--dspark-markov-head-type",
+                type=str,
+                default="vanilla",
+                choices=["vanilla", "gated", "rnn"],
+                help="Markov head type.",
+            )
+            parser.add_argument(
+                "--dspark-num-anchors",
+                type=int,
+                default=512,
+                help="Number of anchor positions to sample per sequence.",
+            )
+            parser.add_argument(
+                "--dspark-mask-token-id",
+                type=int,
+                default=151669,
+                help="Token id used for masked positions in DSpark noise embedding.",
+            )
+            parser.add_argument(
+                "--dspark-ce-loss-alpha",
+                type=float,
+                default=0.1,
+                help="Weight for cross-entropy loss component.",
+            )
+            parser.add_argument(
+                "--dspark-l1-loss-alpha",
+                type=float,
+                default=0.9,
+                help="Weight for L1/TV loss component.",
+            )
+            parser.add_argument(
+                "--dspark-confidence-head-alpha",
+                type=float,
+                default=1.0,
+                help="Weight for confidence head loss component.",
+            )
+            parser.add_argument(
+                "--dspark-loss-decay-gamma",
+                type=float,
+                default=4.0,
+                help="Position decay gamma: weight *= exp(-pos / gamma).",
+            )
+            parser.add_argument(
+                "--dspark-draft-loss-weight",
+                type=float,
+                default=1.0,
+                help="Weight multiplying draft loss added to policy loss.",
+            )
+            parser.add_argument(
+                "--dspark-disable-confidence-head",
+                action="store_true",
+                default=False,
+                help="Disable confidence head (only CE + L1 loss).",
+            )
+            parser.add_argument(
+                "--dspark-freeze-policy",
+                action="store_true",
+                default=False,
+                help="Freeze policy model during DSpark training. Detach policy "
+                "logits so gradient only flows to the draft model. Use when "
+                "RL signal is weak and policy degradation prevents draft "
+                "convergence.",
+            )
+            parser.add_argument(
+                "--dspark-intermediate-size",
+                type=int,
+                default=0,
+                help="DSpark MLP intermediate size. 0 = auto (hidden_size * 2.75). "
+                "Set to match pre-trained checkpoint (9728 for Qwen3-4B).",
+            )
+            parser.add_argument(
+                "--dspark-pretrained-model",
+                type=str,
+                default=None,
+                help="Path to pre-trained DSpark safetensors file. If set, draft "
+                "model weights are loaded from this file instead of random init.",
+            )
+            return parser
+
         def add_ci_arguments(parser):
             parser.add_argument(
                 "--ci-test",
@@ -1586,6 +1692,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
         parser = add_reward_model_arguments(parser)
         parser = add_rollout_buffer_arguments(parser)
         parser = add_mtp_training_arguments(parser)
+        parser = add_dspark_training_arguments(parser)
         parser = add_ci_arguments(parser)
         parser = add_custom_megatron_plugins_arguments(parser)
         reset_arg(
@@ -1787,6 +1894,7 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
 
 def vime_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
+    args.dspark_enabled = (args.vllm_speculative_config or {}).get("method") == "dspark"
 
     if args.kl_coef != 0 or args.use_kl_loss:
         if not os.path.exists(args.ref_load):

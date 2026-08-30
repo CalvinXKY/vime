@@ -13,6 +13,7 @@ These examples provide concrete examples to leverage vime in your own RL workflo
 - **[mem_agent](./mem_agent)**: MemAgent long-context RL — chunk-wise memory update, HotpotQA GRPO training, and RULER-HQA evaluation.
 - **[multi_agent](./multi_agent)**: Example of running multi-agent RL with `vime`.
 - **[on_policy_distillation](./on_policy_distillation)**: On-policy distillation (OPD) with an external vLLM teacher or a Megatron-loaded teacher.
+- **[dspark](./dspark)**: DSpark speculative decoding draft model training — colocate and non-colocate modes for accelerating RL rollouts.
 - **[delta_weight_sync](./delta_weight_sync)**: Non-colocated weight sync that ships only the changed bytes over a shared filesystem (training/inference disaggregation), reloading via the vanilla `update_weights_from_disk` path.
 - **[reproducibility](./reproducibility)**: Guides on achieving bitwise experiment reproduction using deterministic modes.
 - **[tau-bench](./tau-bench)**: Multi-turn tool-use agent training in tau-bench environments.

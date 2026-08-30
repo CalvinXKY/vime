@@ -632,6 +632,11 @@ class MegatronTrainRayActor(TrainRayActor):
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+            if self.args.dspark_enabled and self.args.offload_train:
+                backup = self.weights_backuper.get("actor")
+                for name, param in named_params_and_buffers(self.args, self.model):
+                    if ".draft_model." in name:
+                        param.data = backup[name].to(param.device)
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")
