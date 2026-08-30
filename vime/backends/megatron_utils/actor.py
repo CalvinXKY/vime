@@ -175,11 +175,7 @@ class MegatronTrainRayActor(TrainRayActor):
         self.weight_updater = update_weight_cls(
             self.args,
             self.model,
-            weights_getter=lambda: {
-                name: tensor
-                for name, tensor in self.weights_backuper.get("actor").items()
-                if ".draft_model." not in name
-            },
+            weights_getter=lambda: self.weights_backuper.get("actor"),
             model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
             quantization_config=getattr(self.hf_config, "quantization_config", None),
         )

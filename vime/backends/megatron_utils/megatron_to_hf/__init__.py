@@ -45,8 +45,6 @@ def _convert_to_hf_core(args, model_name, name, param):
         converted_named_tensors = convert_glm4moe_to_hf(args, name, param)
     elif "glm4" in model_name:
         converted_named_tensors = convert_glm4_to_hf(args, name, param)
-    elif "gpt_oss" in model_name or "gpt-oss" in model_name or "gptoss" in model_name:
-        converted_named_tensors = convert_gpt_oss_to_hf(args, name, param)
     elif "qwen3moe" in model_name:
         converted_named_tensors = convert_qwen3moe_to_hf(args, name, param)
     elif "qwen3omni" in model_name:

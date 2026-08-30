@@ -9,6 +9,7 @@ from ray.actor import ActorHandle
 
 from vime.utils.distributed_utils import get_gloo_group
 
+from ..dspark.export import export_dspark_model_weights
 from .common import HfWeightSource, VimeRayWeightSyncClient, create_nccl_trainer
 from .hf_weight_iterator_base import HfWeightIteratorBase
 
@@ -35,15 +36,15 @@ class UpdateWeightFromDistributed:
             model_name=model_name,
             quantization_config=quantization_config,
         )
-        draft_weights_getter = None
-        if self.args.dspark_enabled:
-            from vime.backends.megatron_utils.dspark.export import export_dspark_model_weights
-
-            draft_weights_getter = partial(
+        draft_weights_getter = (
+            partial(
                 export_dspark_model_weights,
                 model,
                 use_policy_embedding=not self.args.dspark_pretrained_model,
             )
+            if self.args.dspark_enabled
+            else None
+        )
         self._source = HfWeightSource(iterator, weights_getter, draft_weights_getter)
         self._trainer = None
 

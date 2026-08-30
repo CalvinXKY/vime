@@ -10,11 +10,24 @@ from torch import nn
 _SHARED_PARAM_NAMES = {"embed_tokens.weight", "lm_head.weight"}
 
 
-def export_dspark_weights_to_hf(
-    draft_model: nn.Module,
-    policy_model: nn.Module | None = None,
+def export_dspark_model_weights(
+    model_chunks: Sequence[nn.Module],
+    *,
+    use_policy_embedding: bool,
 ) -> list[tuple[str, torch.Tensor]]:
     """Export draft weights and strip Megatron's vocabulary padding."""
+    from megatron.core.utils import unwrap_model
+
+    policy_model = None
+    for chunk in reversed(model_chunks):
+        model = unwrap_model(chunk)
+        if getattr(model, "draft_model", None) is not None:
+            policy_model = model
+            break
+    if policy_model is None:
+        raise RuntimeError("DSpark is enabled, but no draft model is attached to the policy")
+
+    draft_model = policy_model.draft_model
     config = getattr(draft_model, "config", None)
     org_vocab_size = getattr(config, "org_vocab_size", 0) or 0
     padded_vocab_size = getattr(config, "vocab_size", 0) or 0
@@ -32,7 +45,7 @@ def export_dspark_weights_to_hf(
 
     embed = (
         _get_policy_embedding(policy_model)
-        if policy_model is not None
+        if use_policy_embedding
         else getattr(getattr(draft_model, "embed_tokens", None), "weight", None)
     )
     if embed is not None:
@@ -45,34 +58,8 @@ def export_dspark_weights_to_hf(
     return hf_state
 
 
-def export_dspark_model_weights(
-    model_chunks: Sequence[nn.Module],
-    *,
-    use_policy_embedding: bool,
-) -> list[tuple[str, torch.Tensor]]:
-    policy_model = get_policy_chunk_with_draft(model_chunks)
-    if policy_model is None:
-        raise RuntimeError("DSpark is enabled, but no draft model is attached to the policy")
-    return export_dspark_weights_to_hf(
-        policy_model.draft_model,
-        policy_model if use_policy_embedding else None,
-    )
-
-
 def _get_policy_embedding(policy_model: nn.Module) -> torch.nn.Parameter | None:
     embed = getattr(policy_model, "embedding", None)
     if embed is None:
         return None
     return getattr(embed, "word_embeddings", embed).weight
-
-
-def get_policy_chunk_with_draft(
-    model_chunks: Sequence[nn.Module],
-) -> nn.Module | None:
-    from megatron.core.utils import unwrap_model
-
-    for chunk in reversed(model_chunks):
-        unwrapped = unwrap_model(chunk)
-        if getattr(unwrapped, "draft_model", None) is not None:
-            return unwrapped
-    return None

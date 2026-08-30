@@ -16,6 +16,7 @@ from tqdm import tqdm
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
 
+from ..dspark.export import export_dspark_model_weights
 from ..megatron_to_hf import convert_to_hf
 from .common import HfWeightSource, VimeRayWeightSyncClient, create_nccl_trainer
 from .expert_routing import configure_expert_routing
@@ -113,15 +114,15 @@ class UpdateWeightFromTensor:
             tuple(tuple(bucket) for bucket in param_info_buckets) if param_info_buckets is not None else None
         )
         self._non_expert_param_info_buckets: list[list[ParamInfo]] | None = None
-        draft_weights_getter = None
-        if self.args.dspark_enabled:
-            from vime.backends.megatron_utils.dspark.export import export_dspark_model_weights
-
-            draft_weights_getter = partial(
+        draft_weights_getter = (
+            partial(
                 export_dspark_model_weights,
                 self.model,
                 use_policy_embedding=not self.args.dspark_pretrained_model,
             )
+            if self.args.dspark_enabled
+            else None
+        )
         self._source = HfWeightSource(self._hf_weight_iterator, self.weights_getter, draft_weights_getter)
 
         self._ipc_gather_group = None
