@@ -394,23 +394,6 @@ class VLLMEngine(RayActor):
         self.set_weight_version(str(target_version))
         return result
 
-    def load_draft_weights_from_file(self, file_path: str):
-        """Load DSpark draft model weights from a file via the collective_rpc endpoint."""
-        if self.node_rank != 0:
-            return
-        response = requests.post(
-            f"http://{self.server_host}:{self.server_port}/collective_rpc",
-            json={"method": "load_draft_weights_from_file", "kwargs": {"file_path": file_path}},
-        )
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            e.add_note(f"{response.text=}")
-            raise
-        if not response.content or not response.content.strip():
-            return {"ok": True}
-        return response.json()
-
     def update_weights_from_disk(
         self,
         model_path: str,
@@ -422,7 +405,7 @@ class VLLMEngine(RayActor):
             return
         response = requests.post(
             f"http://{self.server_host}:{self.server_port}/collective_rpc",
-            json={"method": "reload_weights", "kwargs": {"weights_path": model_path}},
+            json={"method": "reload_weights", "kwargs": {"weights_path": model_path, "is_checkpoint_format": True}},
         )
         try:
             response.raise_for_status()

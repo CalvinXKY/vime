@@ -5,8 +5,8 @@ Adapted from DeepSpec/deepspec/modeling/dspark/common.py for vime Megatron backe
 Key changes from DeepSpec:
 - Removed ``add_metric`` calls (vime uses its own logging_utils).
 - Replaced ``flex_attention.create_block_mask`` with an explicit SDPA-compatible
-  boolean attention mask, because flex_attention is not available in all
-  Megatron/vLLM container images and TP=1 does not need its fusion benefits.
+  boolean attention mask because flex_attention is not available in all
+  Megatron/vLLM container images.
 - Added ``DSparkConfig`` dataclass to bundle all DSpark hyperparameters.
 """
 
@@ -328,17 +328,3 @@ def create_dspark_attention_mask(
     # Add head dim: [bsz, 1, q_len, kv_len]
     full_mask = full_mask.unsqueeze(1)
     return full_mask.to(dtype=dtype, device=device)
-
-
-__all__ = [
-    "DSparkConfig",
-    "DSparkForwardOutput",
-    "AcceptRatePredictor",
-    "validate_target_layer_ids",
-    "create_dspark_attention_mask",
-    "build_anchor_candidate_mask",
-    "sample_anchor_positions",
-    "build_eval_mask",
-    "create_position_ids",
-    "create_noise_embed",
-]

@@ -41,11 +41,11 @@ class CapturedStates:
     """Container for hidden states captured from the policy model.
 
     Attributes:
-        target_hidden_states: [bsz, seq_len, num_target_layers * hidden]
+        target_hidden_states: [seq_len, bsz, num_target_layers * hidden]
             Concatenated hidden states from policy's target_layer_ids.
-        inputs_embeds: [bsz, seq_len, hidden] embedding output (not used by
+        inputs_embeds: [seq_len, bsz, hidden] embedding output (not used by
             DSpark training forward, but captured for potential debugging).
-        target_last_hidden_states: [bsz, seq_len, hidden] policy's final layer
+        target_last_hidden_states: [seq_len, bsz, hidden] policy's final layer
             hidden states. Used for L_tv / L_conf computation.
     """
 
@@ -335,39 +335,33 @@ class HiddenStateCapture:
         return self._gather_distributed()
 
 
-def get_capture_context(
-    model: torch.nn.Module,
-    target_layer_ids: tuple[int, ...],
-    last_layer_idx: int | None = None,
-    enabled: bool = False,
-) -> tuple:
-    """Return a (context_manager, capture_or_None) pair.
+def forward_with_dspark(model, forward_kwargs, batch, target_layer_ids):
+    from megatron.core import tensor_parallel
+    from megatron.core.utils import unwrap_model
 
-    If ``enabled`` is False, returns a nullcontext and None.
-    If ``enabled`` is True, creates a HiddenStateCapture and returns its
-    capture_context() and the capture instance.
+    capture = HiddenStateCapture(model, target_layer_ids)
+    with capture.capture_context():
+        output_tensor = model(**forward_kwargs)
 
-    Usage:
-        ctx, capture = get_capture_context(model, target_layer_ids, enabled=True)
-        with ctx:
-            policy_forward(...)
-        if capture is not None:
-            states = capture.get_captured_states()
-    """
-    from contextlib import nullcontext
+    captured = capture.get_captured_states()
+    policy_model = unwrap_model(model)
+    draft_model = getattr(policy_model, "draft_model", None)
+    if draft_model is None or captured.target_hidden_states is None:
+        return output_tensor, None, None
 
-    if not enabled:
-        return nullcontext(), None
-    capture = HiddenStateCapture(
-        model=model,
-        target_layer_ids=target_layer_ids,
-        last_layer_idx=last_layer_idx,
+    def batch_first(hidden_states):
+        if hidden_states is None:
+            return None
+        if policy_model.config.sequence_parallel:
+            hidden_states = tensor_parallel.gather_from_sequence_parallel_region(
+                hidden_states, tensor_parallel_output_grad=False
+            )
+        return hidden_states.transpose(0, 1).contiguous()
+
+    outputs = draft_model(
+        input_ids=batch["tokens"],
+        target_hidden_states=batch_first(captured.target_hidden_states),
+        loss_mask=batch["full_loss_masks"],
+        target_last_hidden_states=batch_first(captured.target_last_hidden_states),
     )
-    return capture.capture_context(), capture
-
-
-__all__ = [
-    "CapturedStates",
-    "HiddenStateCapture",
-    "get_capture_context",
-]
+    return output_tensor, outputs, draft_model.config
