@@ -170,6 +170,7 @@ def _get_model_provider_func(
                         qk_layernorm=args.qk_layernorm,
                         multi_latent_attention=args.multi_latent_attention,
                         moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
+                        normalization=args.normalization,
                     )
                 else:
                     transformer_layer_spec = get_gpt_layer_local_spec(
@@ -178,6 +179,7 @@ def _get_model_provider_func(
                         qk_layernorm=args.qk_layernorm,
                         multi_latent_attention=args.multi_latent_attention,
                         moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
+                        normalization=args.normalization,
                     )
 
         build_model_context = nullcontext
