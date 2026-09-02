@@ -22,7 +22,7 @@ from vime.utils.types import ParamInfo
 
 MODULE_PATH = "vime.backends.megatron_utils.update_weight.update_weight_from_tensor"
 COMMON_MODULE = "vime.backends.megatron_utils.update_weight.common"
-HF_BASE_MODULE = "vime.backends.megatron_utils.update_weight.hf_weight_iterator_base"
+HF_DIRECT_MODULE = "vime.backends.megatron_utils.update_weight.hf_weight_iterator_direct"
 DISTRIBUTED_MODULE = "vime.backends.megatron_utils.update_weight.update_weight_from_distributed"
 
 
@@ -40,7 +40,7 @@ def update_module():
         "ray.actor",
         "vime.utils.distributed_utils",
         COMMON_MODULE,
-        HF_BASE_MODULE,
+        HF_DIRECT_MODULE,
         DISTRIBUTED_MODULE,
         MODULE_PATH,
     )
@@ -56,10 +56,9 @@ def update_module():
 
     iterator = MagicMock()
     iterator.megatron_local_param_info_buckets = None
-    hf_base = types.ModuleType(HF_BASE_MODULE)
-    hf_base.HfWeightIteratorBase = MagicMock()
-    hf_base.HfWeightIteratorBase.create.return_value = iterator
-    sys.modules[HF_BASE_MODULE] = hf_base
+    hf_direct = types.ModuleType(HF_DIRECT_MODULE)
+    hf_direct.HfWeightIteratorDirect = MagicMock(return_value=iterator)
+    sys.modules[HF_DIRECT_MODULE] = hf_direct
 
     distributed = types.ModuleType(DISTRIBUTED_MODULE)
     distributed.post_process_weights = MagicMock()

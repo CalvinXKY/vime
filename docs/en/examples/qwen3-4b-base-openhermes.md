@@ -44,7 +44,7 @@ Execute the training:
 
 ```bash
 cd /root/vime
-bash script/run-qwen3-4B-base-sft.sh
+bash scripts/run-qwen3-4B-base-sft.sh
 ```
 
 ### Parameter Introduction

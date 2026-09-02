@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import sys
 import types
 from dataclasses import dataclass, field
@@ -336,6 +337,13 @@ def weight_modules():
 class Handle:
     def wait(self):
         pass
+
+
+@pytest.mark.unit
+def test_vllm_weight_iterator_keeps_checkpoint_scale_layout(weight_modules):
+    _, direct_module = weight_modules
+
+    assert inspect.signature(direct_module.HfWeightIteratorDirect).parameters["transform_ue8m0"].default is False
 
 
 def _param_info(name: str, param: torch.Tensor, src_rank: int = 0) -> ParamInfo:

@@ -34,6 +34,7 @@ The vLLM community horizontally supports many LLM post-training frameworks, incl
   - [Quick Start](#quick-start)
     - [Agentic RL examples](#agentic-rl-examples)
   - [Arguments Walkthrough](#arguments-walkthrough)
+  - [Code Reading Path](#code-reading-path)
   - [Developer Guide](#developer-guide)
   - [slime doc](#slime-doc)
   - [FAQ](#faq)
@@ -79,6 +80,23 @@ Arguments in Vime are divided into three categories:
 `--rollout-num-gpus-per-engine` sets the tensor parallel size of each vLLM engine. The default rollout entry is `vime.rollout.vllm_rollout.generate_rollout`.
 
 For complete usage instructions, please refer to the [Usage Documentation](docs/en/get_started/usage.md).
+
+## Code Reading Path
+
+Start from the training loop and follow the calls only as deep as needed:
+
+```text
+train.py: train
+├─ vime/ray/placement_group.py       Ray resource and worker initialization
+├─ vime/ray/rollout.py              RolloutManager.generate: rollout orchestration
+│  └─ vime/rollout/vllm_rollout.py  Sample generation and reward computation
+└─ vime/ray/actor_group.py          RayTrainGroup.async_train: training dispatch
+   └─ vime/backends/megatron_utils/actor.py
+      ├─ model.py                    Megatron model execution
+      └─ loss.py                     RL losses and advantages
+```
+
+On a first pass, treat `vime/utils/arguments.py` as the configuration entry point. The deployment details in `vime/backends/vllm_utils/` and the weight-sync implementations under `vime/backends/megatron_utils/update_weight/` can wait until you need to change those areas.
 
 ## Developer Guide
 

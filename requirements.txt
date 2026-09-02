@@ -17,7 +17,6 @@ pylatexenc
 pyyaml
 qwen_vl_utils # for VLM
 ray[default]
-ring_flash_attn
 safetensors
 tensorboard
 transformers

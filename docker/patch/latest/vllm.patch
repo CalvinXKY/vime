@@ -1,69 +1,5 @@
-diff --git a/vllm/distributed/weight_transfer/base.py b/vllm/distributed/weight_transfer/base.py
-index ddefb77da0..ac5cf087f8 100644
---- a/vllm/distributed/weight_transfer/base.py
-+++ b/vllm/distributed/weight_transfer/base.py
-@@ -178,7 +178,9 @@ class WeightTransferInitRequest:
- class WeightTransferUpdateRequest:
-     """API-level weight update request."""
- 
--    update_info: dict[str, Any] = field(default_factory=dict)
-+    update_info: dict[str, Any] | list[dict[str, Any] | None] = field(
-+        default_factory=dict
-+    )
- 
- 
- class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
-@@ -374,7 +376,9 @@ class VLLMWeightSyncClient(Protocol):
- 
-     def start_weight_update(self) -> None: ...
- 
--    def update_weights(self, update_info: dict[str, Any]) -> None: ...
-+    def update_weights(
-+        self, update_info: dict[str, Any] | list[dict[str, Any] | None]
-+    ) -> None: ...
- 
-     def finish_weight_update(self, weight_version: str | None = None) -> None: ...
- 
-diff --git a/vllm/distributed/weight_transfer/clients.py b/vllm/distributed/weight_transfer/clients.py
-index 12dd0c9eac..528445fba1 100644
---- a/vllm/distributed/weight_transfer/clients.py
-+++ b/vllm/distributed/weight_transfer/clients.py
-@@ -72,10 +72,18 @@ class HTTPVLLMWeightSyncClient:
-     def start_weight_update(self) -> None:
-         self._post("start_weight_update")
- 
--    def update_weights(self, update_info: dict[str, Any]) -> None:
--        self._post(
--            "update_weights", {"update_info": _json_safe_update_info(update_info)}
--        )
-+    def update_weights(
-+        self, update_info: dict[str, Any] | list[dict[str, Any] | None]
-+    ) -> None:
-+        json_update_info: dict[str, Any] | list[dict[str, Any] | None]
-+        if isinstance(update_info, list):
-+            json_update_info = [
-+                _json_safe_update_info(info) if info is not None else None
-+                for info in update_info
-+            ]
-+        else:
-+            json_update_info = _json_safe_update_info(update_info)
-+        self._post("update_weights", {"update_info": json_update_info})
- 
-     def finish_weight_update(self, weight_version: str | None = None) -> None:
-         json = (
-@@ -105,7 +113,9 @@ class RayVLLMWeightSyncClient:
- 
-         ray.get([h.start_weight_update.remote() for h in self.handles])
- 
--    def update_weights(self, update_info: dict[str, Any]) -> None:
-+    def update_weights(
-+        self, update_info: dict[str, Any] | list[dict[str, Any] | None]
-+    ) -> None:
-         import ray
- 
-         request = WeightTransferUpdateRequest(update_info=update_info)
 diff --git a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
-index f304bf677b..5e01e8fca8 100644
+index f304bf677ba..71a17e9363d 100644
 --- a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
 @@ -240,6 +240,8 @@ class GenerateStreamResponse(BaseModel):
@@ -85,17 +21,18 @@ index f304bf677b..5e01e8fca8 100644
  
      kv_transfer_params: dict[str, Any] | None = Field(
 diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
-index 9e9ace877a..3733263bca 100644
+index bbbd85137ce..809f1a66ea5 100644
 --- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
-@@ -14,5 +14,6 @@ from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
+@@ -14,6 +14,7 @@ from vllm.engine.protocol import EngineClient
+ from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
  from vllm.entrypoints.generate.base.serving import (
      GenerateBaseServing,
 +    build_spec_decoding_metrics,
      clamp_prompt_logprobs,
  )
  from vllm.entrypoints.openai.chat_completion.protocol import (
-@@ -250,6 +251,7 @@ class ServingTokens(GenerateBaseServing):
+@@ -261,6 +262,7 @@ class ServingTokens(GenerateBaseServing):
          )
  
          assert result_generator is not None
@@ -103,7 +40,7 @@ index 9e9ace877a..3733263bca 100644
  
          if request.stream:
              return self.serve_tokens_stream_generator(
-@@ -258,10 +260,16 @@ class ServingTokens(GenerateBaseServing):
+@@ -269,10 +271,16 @@ class ServingTokens(GenerateBaseServing):
                  request_id,
                  model_name,
                  request_metadata,
@@ -121,7 +58,7 @@ index 9e9ace877a..3733263bca 100644
          )
  
      async def serve_tokens_full_generator(
-@@ -271,6 +279,7 @@ class ServingTokens(GenerateBaseServing):
+@@ -282,6 +290,7 @@ class ServingTokens(GenerateBaseServing):
          request_id: str,
          model_name: str,
          request_metadata: RequestResponseMetadata,
@@ -129,7 +66,7 @@ index 9e9ace877a..3733263bca 100644
      ) -> ErrorResponse | GenerateResponse:
          created_time = int(time.time())
          final_res: RequestOutput | None = None
-@@ -342,6 +351,11 @@ class ServingTokens(GenerateBaseServing):
+@@ -355,6 +364,11 @@ class ServingTokens(GenerateBaseServing):
                  cached_tokens=final_res.num_cached_tokens
              )
  
@@ -141,7 +78,7 @@ index 9e9ace877a..3733263bca 100644
          request_metadata.final_usage_info = usage
  
          response = GenerateResponse(
-@@ -350,6 +363,8 @@ class ServingTokens(GenerateBaseServing):
+@@ -363,6 +377,8 @@ class ServingTokens(GenerateBaseServing):
              model=model_name,
              choices=choices,
              usage=usage,
@@ -150,7 +87,7 @@ index 9e9ace877a..3733263bca 100644
              prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
              kv_transfer_params=final_res.kv_transfer_params,
              ec_transfer_params=final_res.ec_transfer_params,
-@@ -383,11 +398,13 @@ class ServingTokens(GenerateBaseServing):
+@@ -396,11 +412,13 @@ class ServingTokens(GenerateBaseServing):
          request_id: str,
          model_name: str,
          request_metadata: RequestResponseMetadata,
@@ -164,7 +101,7 @@ index 9e9ace877a..3733263bca 100644
          sampling_params: SamplingParams = request.sampling_params
  
          include_usage, include_continuous_usage = should_include_usage(
-@@ -396,6 +413,9 @@ class ServingTokens(GenerateBaseServing):
+@@ -409,6 +427,9 @@ class ServingTokens(GenerateBaseServing):
  
          try:
              async for res in result_generator:
@@ -174,7 +111,7 @@ index 9e9ace877a..3733263bca 100644
                  if first_iteration:
                      if res.prompt_token_ids is not None:
                          num_prompt_tokens = len(res.prompt_token_ids)
-@@ -435,6 +454,8 @@ class ServingTokens(GenerateBaseServing):
+@@ -448,6 +469,8 @@ class ServingTokens(GenerateBaseServing):
  
                      chunk = GenerateStreamResponse(
                          request_id=request_id,
@@ -183,7 +120,7 @@ index 9e9ace877a..3733263bca 100644
                          choices=[
                              GenerateResponseStreamChoice(
                                  index=i,
-@@ -469,6 +490,8 @@ class ServingTokens(GenerateBaseServing):
+@@ -482,6 +505,8 @@ class ServingTokens(GenerateBaseServing):
              if include_usage:
                  final_chunk = GenerateStreamResponse(
                      request_id=request_id,
@@ -192,51 +129,6 @@ index 9e9ace877a..3733263bca 100644
                      choices=[],
                      usage=final_usage_info,
                  )
-diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index a3b00aaad2..2b05c5e2f5 100644
---- a/vllm/v1/worker/gpu_worker.py
-+++ b/vllm/v1/worker/gpu_worker.py
-@@ -1315,7 +1334,7 @@ class Worker(WorkerBase):
-         self._weight_update_active = True
-         self._weight_update_is_draft = is_draft
- 
--    def update_weights(self, update_info: dict) -> None:
-+    def update_weights(self, update_info: dict | list[dict | None]) -> None:
-         """
-         Receive one weight update chunk from the trainer.
- 
-@@ -1325,7 +1344,9 @@ class Worker(WorkerBase):
-         / start_draft_weight_update call selected.
- 
-         Args:
--            update_info: Dictionary containing backend-specific update info
-+            update_info: Backend-specific update info, or a list indexed by
-+                global worker rank across data parallel replicas. A `None`
-+                entry skips that worker.
-         """
-         self._check_weight_transfer_engine()
-         assert self.weight_transfer_engine is not None
-@@ -1337,7 +1358,19 @@ class Worker(WorkerBase):
- 
-         with set_current_vllm_config(self.vllm_config):
-             try:
--                self.weight_transfer_engine.update_weights(update_info)
-+                if isinstance(update_info, list):
-+                    parallel_config = self.vllm_config.parallel_config
-+                    worker_rank = (
-+                        parallel_config.data_parallel_rank
-+                        * parallel_config.world_size
-+                        + self.rank
-+                    )
-+                    local_update_info = update_info[worker_rank]
-+                else:
-+                    local_update_info = update_info
-+                if local_update_info is None:
-+                    return
-+                self.weight_transfer_engine.update_weights(local_update_info)
-             except BaseException:
-                 self._weight_update_active = False
-                 self.weight_transfer_engine.reset_weight_update_target()
 diff --git a/vllm/model_executor/models/qwen3_omni_moe_thinker.py b/vllm/model_executor/models/qwen3_omni_moe_thinker.py
 --- a/vllm/model_executor/models/qwen3_omni_moe_thinker.py
 +++ b/vllm/model_executor/models/qwen3_omni_moe_thinker.py

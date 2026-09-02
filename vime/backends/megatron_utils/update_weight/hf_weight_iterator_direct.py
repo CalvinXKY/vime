@@ -7,17 +7,21 @@ import torch.distributed as dist
 from megatron.core import mpu
 from tqdm import tqdm
 
+from vime.utils import accelerator
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
 
 from ..megatron_to_hf import convert_to_hf
 from .common import all_gather_params_async, named_params_and_buffers
-from .hf_weight_iterator_base import HfWeightIteratorBase
 
 
-class HfWeightIteratorDirect(HfWeightIteratorBase):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class HfWeightIteratorDirect:
+    def __init__(self, args, model, model_name, quantization_config, transform_ue8m0=False):
+        self.args = args
+        self.model = model
+        self.model_name = model_name
+        self.quantization_config = quantization_config
+        self.transform_ue8m0 = transform_ue8m0
         self.megatron_local_param_info_buckets = _get_megatron_local_param_info_buckets(self.args, self.model)
         self.ep_broadcast_src_rank_map = _get_ep_broadcast_src_rank_map()
 
@@ -88,12 +92,13 @@ def _get_megatron_full_params(
         if dist.get_rank() == info.src_rank:
             params.append(
                 torch.nn.Parameter(
-                    megatron_local_weights[info.name].to(device=torch.cuda.current_device(), non_blocking=True),
+                    megatron_local_weights[info.name].to(device=accelerator.current_device(), non_blocking=True),
                     requires_grad=False,
                 )
             )
         else:
-            params.append(torch.empty(info.shape, dtype=info.dtype, device=torch.cuda.current_device()))
+            params.append(torch.empty(info.shape, dtype=info.dtype, device=accelerator.current_device()))
+    accelerator.synchronize()
     # broadcast params across pp ranks
     if pp_size > 1:
         handles = []

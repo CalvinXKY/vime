@@ -8,26 +8,26 @@ Below is a summary of all available customization interfaces and their purposes.
 
 | Interface Argument | Purpose |
 | :--- | :--- |
-| [`--rollout-function-path`](#1-rollout-function---rollout-function-path) | Override the entire rollout generation logic. |
-| [`--custom-generate-function-path`](#2-custom-generate-function---custom-generate-function-path) | Override only the generation step (e.g., for RAG or tool use). |
-| [`--custom-rm-path`](#3-reward-model---custom-rm-path) | Implement custom reward computation logic. |
-| [`--dynamic-sampling-filter-path`](#4-dynamic-sampling-filter---dynamic-sampling-filter-path) | Filter samples during dynamic sampling (e.g., DAPO). |
-| [`--buffer-filter-path`](#5-buffer-filter---buffer-filter-path) | Filter samples in the rollout buffer before training. |
-| [`--rollout-sample-filter-path`](#6-rollout-sample-filter---rollout-sample-filter-path) | Determine if individual samples participate in loss calculation. |
-| [`--rollout-all-samples-process-path`](#7-rollout-all-samples-process---rollout-all-samples-process-path) | Process all samples (including filtered ones) after rollout. |
-| [`--rollout-data-postprocess-path`](#8-rollout-data-postprocess---rollout-data-postprocess-path) | Post-process rollout data after log probs are computed. |
-| [`--custom-loss-function-path`](#9-custom-loss-function---custom-loss-function-path) | Implement custom training loss computation. |
-| [`--custom-tis-function-path`](#10-custom-tisrs-function---custom-tis-function-path) | Implement custom importance sampling for off-policy correction. |
-| [`--custom-pg-loss-reducer-function-path`](#11-custom-pg-loss-reducer---custom-pg-loss-reducer-function-path) | Customize pg_loss reduction (e.g., for Dr.GRPO). |
-| [`--custom-reward-post-process-path`](#12-reward-post-processing---custom-reward-post-process-path) | Custom post-processing of rewards before advantage computation. |
-| [`--custom-convert-samples-to-train-data-path`](#13-samples-to-train-data-conversion---custom-convert-samples-to-train-data-path) | Override the conversion of samples to training data format. |
-| [`--custom-rollout-log-function-path`](#14-logging-functions) | Custom logging for training rollouts. |
-| [`--custom-eval-rollout-log-function-path`](#14-logging-functions) | Custom logging for evaluation rollouts. |
-| [`--data-source-path`](#15-data-source---data-source-path) | Override the data source for rollout prompts. |
-| [`--eval-function-path`](#16-evaluation-function---eval-function-path) | Override the rollout function specifically for evaluation. |
-| [`--custom-megatron-init-path`](#17-megatron-hooks) | Custom initialization after Megatron setup. |
-| [`--custom-megatron-before-log-prob-hook-path`](#17-megatron-hooks) | Custom logic before log probability computation. |
-| [`--custom-megatron-before-train-step-hook-path`](#17-megatron-hooks) | Custom logic before each training step. |
+| [`--rollout-function-path`](#rollout-function-path) | Override the entire rollout generation logic. |
+| [`--custom-generate-function-path`](#custom-generate-function-path) | Override only the generation step (e.g., for RAG or tool use). |
+| [`--custom-rm-path`](#custom-rm-path) | Implement custom reward computation logic. |
+| [`--dynamic-sampling-filter-path`](#dynamic-sampling-filter-path) | Filter samples during dynamic sampling (e.g., DAPO). |
+| [`--buffer-filter-path`](#buffer-filter-path) | Filter samples in the rollout buffer before training. |
+| [`--rollout-sample-filter-path`](#rollout-sample-filter-path) | Determine if individual samples participate in loss calculation. |
+| [`--rollout-all-samples-process-path`](#rollout-all-samples-process-path) | Process all samples (including filtered ones) after rollout. |
+| [`--rollout-data-postprocess-path`](#rollout-data-postprocess-path) | Post-process rollout data after log probs are computed. |
+| [`--custom-loss-function-path`](#custom-loss-function-path) | Implement custom training loss computation. |
+| [`--custom-tis-function-path`](#custom-tis-function-path) | Implement custom importance sampling for off-policy correction. |
+| [`--custom-pg-loss-reducer-function-path`](#custom-pg-loss-reducer-function-path) | Customize pg_loss reduction (e.g., for Dr.GRPO). |
+| [`--custom-reward-post-process-path`](#custom-reward-post-process-path) | Custom post-processing of rewards before advantage computation. |
+| [`--custom-convert-samples-to-train-data-path`](#custom-convert-samples-to-train-data-path) | Override the conversion of samples to training data format. |
+| [`--custom-rollout-log-function-path`](#logging-functions) | Custom logging for training rollouts. |
+| [`--custom-eval-rollout-log-function-path`](#logging-functions) | Custom logging for evaluation rollouts. |
+| [`--data-source-path`](#data-source-path) | Override the data source for rollout prompts. |
+| [`--eval-function-path`](#eval-function-path) | Override the rollout function specifically for evaluation. |
+| [`--custom-megatron-init-path`](#megatron-hooks) | Custom initialization after Megatron setup. |
+| [`--custom-megatron-before-log-prob-hook-path`](#megatron-hooks) | Custom logic before log probability computation. |
+| [`--custom-megatron-before-train-step-hook-path`](#megatron-hooks) | Custom logic before each training step. |
 
 ## Agentic workflows through customization interfaces
 
@@ -37,18 +37,18 @@ For most agentic use cases, **start with `--custom-generate-function-path` plus 
 
 | If you need to … | Use |
 | :--- | :--- |
-| Run a custom agent loop, tool calls, RAG, sandbox execution, browser/terminal interaction, or multi-turn generation for each sample, while reusing vime's default rollout loop | [`--custom-generate-function-path`](#2-custom-generate-function---custom-generate-function-path) |
-| Compute verifier rewards, test-based rewards, environment success checks, rule-based rewards, or call an external reward service | [`--custom-rm-path`](#3-reward-model---custom-rm-path) |
-| Replace the entire rollout orchestration (only when per-sample customization is not enough) | [`--rollout-function-path`](#1-rollout-function---rollout-function-path) |
-| Control task sampling, buffering, requeueing, or custom prompt/task sources | [`--data-source-path`](#15-data-source---data-source-path) |
-| Attach custom loss masks, metadata, or convert agentic outputs into training data | [`--rollout-data-postprocess-path`](#8-rollout-data-postprocess---rollout-data-postprocess-path), [`--custom-convert-samples-to-train-data-path`](#13-samples-to-train-data-conversion---custom-convert-samples-to-train-data-path) |
-| Debug long-running custom generation, verifier calls, tool calls, or sandbox steps | trace utilities in [`vime.utils.trace_utils`](../developer_guide/trace.md) |
+| Run a custom agent loop, tool calls, RAG, sandbox execution, browser/terminal interaction, or multi-turn generation for each sample, while reusing vime's default rollout loop | [`--custom-generate-function-path`](#custom-generate-function-path) |
+| Compute verifier rewards, test-based rewards, environment success checks, rule-based rewards, or call an external reward service | [`--custom-rm-path`](#custom-rm-path) |
+| Replace the entire rollout orchestration (only when per-sample customization is not enough) | [`--rollout-function-path`](#rollout-function-path) |
+| Control task sampling, buffering, requeueing, or custom prompt/task sources | [`--data-source-path`](#data-source-path) |
+| Attach custom loss masks, metadata, or convert agentic outputs into training data | [`--rollout-data-postprocess-path`](#rollout-data-postprocess-path), [`--custom-convert-samples-to-train-data-path`](#custom-convert-samples-to-train-data-path) |
+| Debug long-running custom generation, verifier calls, tool calls, or sandbox steps | trace utilities in [`vime.observability.trace_utils`](../developer_guide/trace.md) |
 
 Native examples of this pattern: [`examples/multi_agent`](../../../examples/multi_agent/README.md) (a `--rollout-function-path`-based multi-agent pattern) and [`examples/fully_async`](../../../examples/fully_async/README.md) (long-tail agentic generation), both keeping vime's default `vllm_rollout` outer loop.
 
 ## Detailed Interface Reference
 
-### 1. Rollout Function (`--rollout-function-path`)
+### `--rollout-function-path`
 
 **Default**: `vime.rollout.vllm_rollout.generate_rollout`
 
@@ -64,11 +64,11 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 - Adding custom sampling strategies
 - Integrating external tools or APIs during generation
 
-**Example**: See [examples/multi_agent/rollout_with_multi_agents.py](../../../examples/multi_agent/rollout_with_multi_agents.py)
+**Example**: See [examples/fully_async](../_examples_synced/fully_async/README.md)
 
 ---
 
-### 2. Custom Generate Function (`--custom-generate-function-path`)
+### `--custom-generate-function-path`
 
 **Default**: `None` (uses built-in generate function)
 
@@ -118,7 +118,7 @@ If one full trajectory has a single total reward but is split into `K` training 
 
 ---
 
-### 3. Reward Model (`--custom-rm-path`)
+### `--custom-rm-path`
 
 **Default**: `None` (uses built-in reward models based on `--rm-type`)
 
@@ -150,7 +150,7 @@ async def batched_custom_rm(args, samples: list[Sample]) -> list[float]
 
 ---
 
-### 4. Dynamic Sampling Filter (`--dynamic-sampling-filter-path`)
+### `--dynamic-sampling-filter-path`
 
 **Default**: `None`
 
@@ -178,7 +178,7 @@ class DynamicFilterOutput:
 
 ---
 
-### 5. Buffer Filter (`--buffer-filter-path`)
+### `--buffer-filter-path`
 
 **Default**: `None`
 
@@ -196,7 +196,7 @@ def buffer_filter(args, rollout_id, buffer: list[list[Sample]], num_samples: int
 
 ---
 
-### 6. Rollout Sample Filter (`--rollout-sample-filter-path`)
+### `--rollout-sample-filter-path`
 
 **Default**: `None`
 
@@ -215,7 +215,7 @@ def filter_function(args, samples: list[Sample]) -> None
 
 ---
 
-### 7. Rollout All Samples Process (`--rollout-all-samples-process-path`)
+### `--rollout-all-samples-process-path`
 
 **Default**: `None`
 
@@ -232,7 +232,7 @@ def process_function(args, samples: list[list[Sample]], data_source) -> None
 
 ---
 
-### 8. Rollout Data Postprocess (`--rollout-data-postprocess-path`)
+### `--rollout-data-postprocess-path`
 
 **Default**: `None`
 
@@ -249,7 +249,7 @@ def postprocess_function(args, samples: list[list[Sample]]) -> None
 
 ---
 
-### 9. Custom Loss Function (`--custom-loss-function-path`)
+### `--custom-loss-function-path`
 
 **Default**: `None` (requires `--loss-type custom_loss`)
 
@@ -262,7 +262,7 @@ def postprocess_function(args, samples: list[list[Sample]]) -> None
 
 ---
 
-### 10. Custom TIS/RS Function (`--custom-tis-function-path`)
+### `--custom-tis-function-path`
 
 **Default**: `None`
 
@@ -276,7 +276,7 @@ def postprocess_function(args, samples: list[list[Sample]]) -> None
 
 ---
 
-### 11. Custom pg_loss Reducer (`--custom-pg-loss-reducer-function-path`)
+### `--custom-pg-loss-reducer-function-path`
 
 **Default**: `None`
 
@@ -298,7 +298,7 @@ def get_pg_loss_reducer(
 
 ---
 
-### 12. Reward Post-Processing (`--custom-reward-post-process-path`)
+### `--custom-reward-post-process-path`
 
 **Default**: `None` (uses default GRPO normalization)
 
@@ -310,7 +310,7 @@ def get_pg_loss_reducer(
 
 ---
 
-### 13. Samples to Train Data Conversion (`--custom-convert-samples-to-train-data-path`)
+### `--custom-convert-samples-to-train-data-path`
 
 **Default**: `None` (uses built-in conversion logic)
 
@@ -350,7 +350,7 @@ dict: {
 
 ---
 
-### 14. Logging Functions
+### Logging functions
 
 #### Training Rollout Logging (`--custom-rollout-log-function-path`)
 
@@ -372,7 +372,7 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool
 
 ---
 
-### 15. Data Source (`--data-source-path`)
+### `--data-source-path`
 
 **Default**: `vime.rollout.data_source.RolloutDataSourceWithBuffer`
 
@@ -401,7 +401,7 @@ class CustomDataSource(DataSource):
 
 ---
 
-### 16. Evaluation Function (`--eval-function-path`)
+### `--eval-function-path`
 
 **Default**: Same as `--rollout-function-path`
 
@@ -413,7 +413,7 @@ class CustomDataSource(DataSource):
 
 ---
 
-### 17. Megatron Hooks
+### Megatron hooks
 
 #### Megatron Initialization (`--custom-megatron-init-path`)
 

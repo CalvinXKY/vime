@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare matching Megatron and VLLM decoder-layer outputs."""
+"""Compare matching Megatron and vLLM decoder-layer outputs for tests."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def _token_rows(value: Any, num_tokens: int, context: str) -> torch.Tensor:
 
 def _vllm_layer_token_rows(value: Any, num_tokens: int, context: str) -> torch.Tensor:
     if not isinstance(value, (tuple, list)) or len(value) < 2:
-        raise TypeError(f"{context} must contain the VLLM layer delta and residual tensors")
+        raise TypeError(f"{context} must contain the vLLM layer delta and residual tensors")
     delta, residual = value[:2]
     if not isinstance(delta, torch.Tensor) or not isinstance(residual, torch.Tensor):
         raise TypeError(f"{context} contains non-tensor layer outputs")
@@ -138,7 +138,7 @@ def _vllm_segments(record: dict[str, Any]):
         counts = [int(value) for value in extend_seq_lens.reshape(-1).tolist()]
     if len(counts) != len(rids) or sum(counts) != input_ids.numel():
         raise ValueError(
-            "VLLM request segmentation mismatch: " f"rids={len(rids)}, counts={counts}, tokens={input_ids.numel()}"
+            "vLLM request segmentation mismatch: " f"rids={len(rids)}, counts={counts}, tokens={input_ids.numel()}"
         )
 
     segments = []
@@ -159,7 +159,7 @@ def _vllm_dump_files(dump_dir: Path) -> list[Path]:
         files.extend(sorted(process_dir.glob("Chunk*.pt")))
         files.extend(sorted(process_dir.glob("Pass*.pt")))
     if not files:
-        raise FileNotFoundError(f"No VLLM layer dumps found under {dump_dir}")
+        raise FileNotFoundError(f"No vLLM layer dumps found under {dump_dir}")
     return files
 
 
@@ -178,7 +178,7 @@ def map_requests_to_train_sequences(dump_files: list[Path], train_sequences: lis
                     previous = request_observations.setdefault(position, token_id)
                     if previous != token_id:
                         raise ValueError(
-                            f"VLLM request {rid} changed token at position {position}: " f"{previous} != {token_id}"
+                            f"vLLM request {rid} changed token at position {position}: " f"{previous} != {token_id}"
                         )
 
     mapping = {}
@@ -191,10 +191,10 @@ def map_requests_to_train_sequences(dump_files: list[Path], train_sequences: lis
             ):
                 candidates.append(sequence_id)
         if not candidates:
-            raise RuntimeError(f"Could not map VLLM request {rid} to any Megatron token sequence")
+            raise RuntimeError(f"Could not map vLLM request {rid} to any Megatron token sequence")
         mapping[rid] = candidates[0]
     if not mapping:
-        raise RuntimeError("VLLM dumps contained no request observations")
+        raise RuntimeError("vLLM dumps contained no request observations")
     return mapping
 
 
@@ -215,7 +215,7 @@ def compare_layer_outputs(
             rollout_layers = _layer_outputs(record, selected_layers)
             missing = selected_layers - set(rollout_layers)
             if missing:
-                raise KeyError(f"{dump_file} is missing VLLM layers {sorted(missing)}")
+                raise KeyError(f"{dump_file} is missing vLLM layers {sorted(missing)}")
             rollout_rows = {
                 layer_id: _vllm_layer_token_rows(
                     value,
@@ -233,7 +233,7 @@ def compare_layer_outputs(
                         [
                             # A causal LM never consumes the hidden state at the
                             # final input position to score a token in this
-                            # sequence. VLLM may still execute that terminal
+                            # sequence. vLLM may still execute that terminal
                             # token after sampling it, whereas Megatron's
                             # log-prob forward stops at score-producing
                             # positions. The terminal state therefore has no
@@ -248,7 +248,7 @@ def compare_layer_outputs(
                         continue
                     kept_positions = segment_positions[keep]
                     if torch.any(kept_positions < 0) or torch.any(kept_positions >= train_sequence.tokens.numel()):
-                        raise IndexError(f"VLLM request {rid} contains positions outside its " "Megatron sequence")
+                        raise IndexError(f"vLLM request {rid} contains positions outside its " "Megatron sequence")
                     rollout_value = rollout_rows[layer_id][token_slice][keep]
                     train_value = train_sequence.layers[layer_id][kept_positions]
                     difference = (rollout_value.float() - train_value.float()).abs()

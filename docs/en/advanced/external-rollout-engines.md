@@ -16,6 +16,8 @@ This page is a roadmap. Use it to decide when to use `--rollout-external-engine-
 | Rollout serving can use an independent vLLM environment, or even different GPU models/vendors | external engines + disk transport |
 | You need frozen reference, reward, or tool-side models | Prefer `update_weights: false` in [vLLM Config](vllm-config.md#3-multi-model-serving) |
 
+Delta mode supports disk transport only. Use full mode when syncing weights over NCCL.
+
 ## What External Engine Does
 
 First launch vLLM servers independently:

@@ -11,7 +11,7 @@ from vime.utils.distributed_utils import get_gloo_group
 
 from ..dspark.export import export_dspark_model_weights
 from .common import HfWeightSource, VimeRayWeightSyncClient, create_nccl_trainer
-from .hf_weight_iterator_base import HfWeightIteratorBase
+from .hf_weight_iterator_direct import HfWeightIteratorDirect
 
 
 class UpdateWeightFromDistributed:
@@ -30,7 +30,7 @@ class UpdateWeightFromDistributed:
         self.quantization_config = quantization_config
         self.weight_version = 0
         self.update_weight_metrics: dict[str, float] = {}
-        iterator = HfWeightIteratorBase.create(
+        iterator = HfWeightIteratorDirect(
             args=args,
             model=model,
             model_name=model_name,

@@ -10,8 +10,8 @@ import yaml
 from vime.backends.vllm_utils.arguments import validate_args as vllm_validate_args
 from vime.backends.vllm_utils.arguments import vllm_parse_args
 from vime.backends.vllm_utils.external import apply_external_engine_info_to_args
+from vime.observability.logging_utils import configure_logger
 from vime.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
-from vime.utils.logging_utils import configure_logger
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,16 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 type=json.loads,
                 default="{}",
                 help="Extra environment variables for training process, e.g. PyTorch memory management ones.",
+            )
+            parser.add_argument(
+                "--force-fp8-ue8m0-scale",
+                action="store_true",
+                default=False,
+                help=(
+                    "Quantize block-FP8 rollout weights with power-of-two FP32 scales, "
+                    "independent of the training GPU architecture. Blackwell-only scale "
+                    "packing remains controlled by the rollout runtime requirements."
+                ),
             )
             # Delta weight sync.
             parser.add_argument(
@@ -353,7 +363,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 "--rollout-temperature",
                 type=float,
                 default=1.0,
-                help="the temperature for the inference engine during rollout.",
+                help="the temperature for the inference engine during rollout. Must be > 0.",
             )
             parser.add_argument(
                 "--rollout-top-p", type=float, default=1.0, help="the top-p for the inference engine during rollout."
@@ -657,8 +667,9 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "The path to the prompt data. "
-                    "Currently we only support jsonl format, and each line should contains --input-key and --label-key, "
-                    "which will be used as the prompt and the label respectively. "
+                    "Supported formats are JSONL and Parquet (Parquet requires pyarrow). "
+                    "Each record should contain --input-key and --label-key, which will be used as the prompt and "
+                    "the label respectively. "
                     "If you want to use a custom template, you can set --apply-chat-template to true, in that case, "
                     "the input should be the same structure as an openai message, e.g. [{'role': 'user', 'content': 'blabla'}]. "
                 ),
@@ -1326,13 +1337,6 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
             )
             parser.add_argument(
-                "--profile-target",
-                type=str,
-                choices=["train_overall", "train_actor", "train_log_probs"],
-                default=["train_overall"],
-                nargs="+",
-            )
-            parser.add_argument(
                 "--memory-recorder",
                 type=str,
                 choices=["torch", "memray"],
@@ -1762,7 +1766,7 @@ def parse_args(add_custom_arguments=None):
 
     vime_validate_args(args)
 
-    if pre.train_backend == "megatron" and not args.debug_rollout_only:
+    if not args.debug_rollout_only:
         megatron_validate_args(args)
 
     if not args.debug_train_only:
@@ -1894,7 +1898,12 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
 
 def vime_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
-    args.dspark_enabled = (args.vllm_speculative_config or {}).get("method") == "dspark"
+    args.dspark_enabled = (getattr(args, "vllm_speculative_config", None) or {}).get("method") == "dspark"
+
+    if args.rollout_temperature <= 0:
+        raise ValueError(
+            "--rollout-temperature must be > 0; temperature 0 is greedy decoding and is not a valid RL policy."
+        )
 
     if args.kl_coef != 0 or args.use_kl_loss:
         if not os.path.exists(args.ref_load):
@@ -2181,8 +2190,6 @@ def vime_validate_args(args):
             "a filesystem shared between the trainer and the rollout engines."
         )
     if args.release_train:
-        if args.train_backend != "megatron":
-            raise ValueError("--release-train is only supported with the Megatron train backend.")
         if args.use_critic:
             raise ValueError("--release-train does not support critic training yet.")
         if args.keep_old_actor:

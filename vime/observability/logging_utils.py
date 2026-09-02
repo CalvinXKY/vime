@@ -2,13 +2,13 @@ import logging
 
 import wandb
 
-from . import wandb_utils
-from .tensorboard_utils import _TensorboardAdapter
+from vime.observability import wandb_utils
+from vime.observability.tensorboard_utils import _TensorboardAdapter
 
 _LOGGER_CONFIGURED = False
 
 
-# ref: VLLM
+# ref: vLLM
 def configure_logger(prefix: str = ""):
     global _LOGGER_CONFIGURED
     if _LOGGER_CONFIGURED:

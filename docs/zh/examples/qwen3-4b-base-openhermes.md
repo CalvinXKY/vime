@@ -44,7 +44,7 @@ ds.to_parquet("/root/openhermes2_5.parquet")
 
 ```bash
 cd /root/vime
-bash script/run-qwen3-4B-base-sft.sh
+bash scripts/run-qwen3-4B-base-sft.sh
 ```
 
 ### 参数简介

@@ -93,7 +93,7 @@ def _run_vllm_server(kwargs: dict, env: dict) -> None:
     os.environ.update(env)
 
     from vllm.entrypoints.cli.serve import ServeSubcommand
-    from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser, validate_parsed_serve_args
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     ns = argparse.Namespace(**kwargs)
@@ -541,7 +541,7 @@ def _resolve_parallel_sizes(
     invalid_fields = _INVALID_VLLM_PARALLEL_FIELDS.intersection(overrides)
     if invalid_fields:
         raise ValueError(
-            "vLLM 0.27.1 does not accept explicit EP/MoE-DP sizes; use "
+            "vLLM does not accept explicit EP/MoE-DP sizes; use "
             "enable_expert_parallel with TP/PCP/DP instead: "
             f"{sorted(invalid_fields)}"
         )
@@ -747,7 +747,7 @@ def _compute_server_args(
 def _vllm_server_field_names() -> frozenset[str]:
     """Return the vLLM fields accepted by CLI generation and config overrides."""
     from vllm.engine.arg_utils import AsyncEngineArgs
-    from vllm.entrypoints.openai.cli_args import FrontendArgs
+    from vllm.entrypoints.launchers.cli_args import FrontendArgs
 
     return frozenset(f.name for f in (*dataclasses.fields(AsyncEngineArgs), *dataclasses.fields(FrontendArgs)))
 

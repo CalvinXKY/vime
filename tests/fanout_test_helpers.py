@@ -1,34 +1,32 @@
-"""Test-internal compact-rollout helpers used by ``test_qwen2.5_0.5B_fanout_short.py``.
+"""Compact-rollout helpers for ``test_qwen2.5_0.5B_fanout_short.py``.
 
-The underscore prefix marks this as test infrastructure — it is not part
-of the user-facing vime API and is not re-exported anywhere. It lives
-in ``vime/`` only so the test can reference it by a dotted module path
-(``--custom-generate-function-path`` / ``--custom-reward-post-process-path``
-resolve a string via ``importlib.import_module``, which can't handle the
-dots in the e2e test's filename).
+These helpers are imported by module path from the Ray job started by the E2E
+test. They live on the test-only portion of ``PYTHONPATH`` because they are
+test fixtures, not part of vime's public or internal runtime API.
 
 Two helpers:
 
   - ``compact_generate``: fans one input sample out to N siblings
     sharing the same ``rollout_id``. That's the contract the rest of the
     framework (per-rollout step splitter, per-rollout-mean reducer,
-    ``_validate_rollout_id_annotated`` validator) is built around.
+    ``validate_rollout_id_annotated`` validator) is built around.
 
   - ``grpo_normalize_by_group_index``: replaces the default
     ``_post_process_rewards`` reshape-by-shape logic with a proper
     ``group_index``-keyed grouping. The default at
-    ``vime/ray/rollout.py:_post_process_rewards`` assumes every prompt
-    produced exactly ``n_samples_per_prompt`` samples and reshapes by
-    that constant; when compact/fanout makes the per-prompt count uneven,
-    the reshape fails and the fallback ``view(-1, total)`` collapses
-    everything into ONE group, destroying per-prompt centering.
-    ``group_index`` (set by the data source per-prompt, preserved through
-    ``deepcopy``) is the right key here.
+    ``vime/ray/rollout.py:618`` assumes every prompt produced exactly
+    ``n_samples_per_prompt`` samples and reshapes by that constant; when
+    compact/fanout makes the per-prompt count uneven, the reshape fails
+    and the fallback ``view(-1, total)`` collapses everything into ONE
+    group, destroying per-prompt centering. ``group_index`` (set by the
+    data source per-prompt, preserved through ``deepcopy``) is the right
+    key here.
 """
 
 import copy
 import os
 from collections import defaultdict
+
 
 MAX_FANOUT = 3
 
@@ -41,7 +39,7 @@ COUNTER_FILE_ENV = "VIME_FANOUT_TEST_COUNTER_FILE"
 async def compact_generate(args, sample, sampling_params):
     """One prompt → N siblings, deterministic N = 1 + (index % MAX_FANOUT).
 
-    Strategy: call vLLM once, deepcopy N-1 times. Bounded GPU cost —
+    Strategy: call vllm once, deepcopy N-1 times. Bounded GPU cost —
     we're pinning the framework's per-rollout handling, not generation
     diversity.
     """
@@ -75,7 +73,7 @@ async def compact_generate(args, sample, sampling_params):
 def grpo_normalize_by_group_index(args, samples):
     """Drop-in ``--custom-reward-post-process-path`` for compact/fanout.
 
-    The default ``_post_process_rewards`` (``vime/ray/rollout.py``)
+    The default ``_post_process_rewards`` (``vime/ray/rollout.py:618``)
     reshapes the flat reward tensor as ``(-1, n_samples_per_prompt)``
     when ``total == n_samples_per_prompt * rollout_batch_size``, falling
     back to ``view(-1, total)`` (= one giant group) otherwise. With

@@ -23,8 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import vime.utils.external_utils.command_utils as U
 from vime.backends.vllm_utils.arguments import vllm_parse_args
+from vime.backends.vllm_utils.deployment import start_rollout_servers
 from vime.ray.placement_group import _create_placement_group
-from vime.ray.rollout import start_rollout_servers
 from vime.rollout import vllm_rollout
 from vime.utils.http_utils import init_http_client, is_port_available, post
 from vime.utils.processing_utils import load_tokenizer

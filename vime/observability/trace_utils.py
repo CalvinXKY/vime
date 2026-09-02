@@ -94,12 +94,6 @@ class TraceSpanContext:
             _log_trace_error("update", exc)
         return self
 
-    def set_attr(self, key: str, value: Any) -> TraceSpanContext:
-        return self.set(key, value)
-
-    def update_attrs(self, attrs: dict[str, Any] | None) -> TraceSpanContext:
-        return self.update(attrs)
-
     def build_end_attrs(self) -> dict[str, Any] | None:
         return dict(self.end_attrs) or None
 
@@ -143,23 +137,20 @@ def _new_span_id() -> str:
     return uuid.uuid4().hex
 
 
-def build_vllm_meta_trace_attrs(output: dict[str, Any]) -> dict[str, Any]:
-    """Trace-span attributes from a vLLM ``/inference/v1/generate`` response."""
+def build_vllm_meta_trace_attrs(meta: dict[str, Any]) -> dict[str, Any]:
     attrs: dict[str, Any] = {}
     try:
-        choices = output.get("choices") or []
-        if choices and choices[0].get("finish_reason") is not None:
-            attrs["finish_reason"] = choices[0]["finish_reason"]
-        usage = output.get("usage") or {}
-        for key in ("prompt_tokens", "completion_tokens", "cached_tokens"):
-            if usage.get(key) is not None:
-                attrs[key] = usage[key]
-            elif output.get(key) is not None:
-                attrs[key] = output[key]
-        if output.get("finish_reason") is not None:
-            finish_reason = output["finish_reason"]
-            attrs["finish_reason"] = finish_reason.get("type") if isinstance(finish_reason, dict) else finish_reason
-        trace_children = _build_vllm_pd_trace_children(output)
+        attrs.update({key: meta[key] for key in VLLM_TRACE_META_KEYS if key in meta and meta[key] is not None})
+        finish_reason = meta.get("finish_reason")
+        if isinstance(finish_reason, dict) and finish_reason.get("type") is not None:
+            attrs["finish_reason"] = finish_reason["type"]
+        elif finish_reason is not None:
+            attrs["finish_reason"] = finish_reason
+
+        if meta.get("id") is not None:
+            attrs["vllm_request_id"] = meta["id"]
+
+        trace_children = _build_vllm_pd_trace_children(meta)
         if trace_children:
             attrs[TRACE_CHILDREN_KEY] = trace_children
     except Exception as exc:

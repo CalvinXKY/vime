@@ -31,8 +31,8 @@ Additionally, vime supports Prefill and Decode disaggregation (PD Disaggregation
 
 ### Choosing Training Backend
 
-vime currently supports Megatron-LM as its training backend for efficient
-large-scale model training.
+vime currently uses Megatron-LM as its training backend. The compatibility option
+`--train-backend megatron` may still be supplied explicitly.
 
 ### Loading Megatron
 
@@ -151,7 +151,7 @@ For details on some of vLLM's customizations and the principles behind how vime 
 
 ### Data Format
 
-Currently, vime only supports loading files in `.jsonl` format, where each line of the file is a JSON object. An example of a single data entry (expanded) is as follows:
+vime supports `.jsonl` and `.parquet` files; reading Parquet requires `pyarrow`. Each record in either format should contain the fields selected by `--input-key` and `--label-key`. An expanded JSONL record looks like this:
 
 ```json
 {

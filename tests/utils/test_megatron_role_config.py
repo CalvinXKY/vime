@@ -172,3 +172,7 @@ class TestMegatronRoleConfig:
         assert actor_model.args.lr == 1e-6
         assert actor_model.create_calls[0]["args"].lr == 1e-6
         assert args.start_rollout_id == 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))

@@ -43,7 +43,6 @@ from vime.backends.megatron_utils.megatron_to_hf.qwen2 import convert_qwen2_to_h
 from vime.backends.megatron_utils.megatron_to_hf.qwen3_next import convert_qwen3_next_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.qwen3_omni import convert_qwen3_omni_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.qwen3moe import convert_qwen3moe_to_hf
-from vime.backends.megatron_utils.update_weight.hf_weight_iterator_base import HfWeightIteratorBase
 
 NUM_GPUS = 0
 
@@ -101,7 +100,6 @@ def test_vllm_fp8_weight_transfer_defaults_to_raw_ue8m0_scale(monkeypatch):
 
     assert captured["transform_ue8m0"] is False
     assert inspect.signature(convert_to_hf).parameters["transform_ue8m0"].default is False
-    assert inspect.signature(HfWeightIteratorBase.__init__).parameters["transform_ue8m0"].default is False
 
 
 @pytest.mark.unit

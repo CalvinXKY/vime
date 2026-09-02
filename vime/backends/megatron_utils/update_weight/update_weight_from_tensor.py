@@ -13,6 +13,7 @@ from ray import ObjectRef
 from ray.actor import ActorHandle
 from tqdm import tqdm
 
+from vime.utils import accelerator
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
 
@@ -20,7 +21,7 @@ from ..dspark.export import export_dspark_model_weights
 from ..megatron_to_hf import convert_to_hf
 from .common import HfWeightSource, VimeRayWeightSyncClient, create_nccl_trainer
 from .expert_routing import configure_expert_routing
-from .hf_weight_iterator_base import HfWeightIteratorBase
+from .hf_weight_iterator_direct import HfWeightIteratorDirect
 from .update_weight_from_distributed import post_process_weights
 
 
@@ -106,7 +107,7 @@ class UpdateWeightFromTensor:
         self.weight_version = 0
         self.update_weight_metrics: dict[str, float] = {}
 
-        self._hf_weight_iterator = HfWeightIteratorBase.create(
+        self._hf_weight_iterator = HfWeightIteratorDirect(
             args=args, model=model, model_name=model_name, quantization_config=quantization_config
         )
         param_info_buckets = getattr(self._hf_weight_iterator, "megatron_local_param_info_buckets", None)
@@ -270,7 +271,7 @@ class UpdateWeightFromTensor:
                 offset = buffer_offsets[key]
                 buffer_offsets[key] = offset + 1
                 if offset == len(pool):
-                    pool.append(torch.empty(info.shape, dtype=info.dtype, device="cuda"))
+                    pool.append(torch.empty(info.shape, dtype=info.dtype, device=accelerator.device()))
                 tensor = pool[offset]
                 if self.rank == transfer.source_rank:
                     source = megatron_local_weights[info.name]
@@ -327,12 +328,12 @@ class UpdateWeightFromTensor:
                 refs, long_lived_tensors = self._send_hf_params(hf_named_tensors)
                 ray.get(refs)
                 dist.barrier(group=get_gloo_group())
-                torch.cuda.synchronize()
+                accelerator.synchronize()
                 del refs, long_lived_tensors, hf_named_tensors
-                torch.cuda.ipc_collect()
-                torch.cuda.empty_cache()
+                accelerator.ipc_collect()
+                accelerator.empty_cache()
         del staging_buffers
-        torch.cuda.empty_cache()
+        accelerator.empty_cache()
 
     @torch.no_grad()
     def update_weights(self) -> None:
@@ -391,8 +392,8 @@ class UpdateWeightFromTensor:
 
         self._send_weight_chunks(megatron_local_weights)
         dist.barrier(group=get_gloo_group())
-        torch.cuda.ipc_collect()
-        torch.cuda.empty_cache()
+        accelerator.ipc_collect()
+        accelerator.empty_cache()
 
         if self._ipc_engine is not None and self.rank == self._ipc_gather_src:
             ray.get(self._ipc_engine.finish_weight_update.remote(weight_version=str(self.weight_version)))
@@ -409,8 +410,8 @@ class UpdateWeightFromTensor:
             refs, long_lived_tensors = self._send_hf_params(hf_named_tensors)
             ray.get(refs)
             del refs, long_lived_tensors, hf_named_tensors
-            torch.cuda.ipc_collect()
-            torch.cuda.empty_cache()
+            accelerator.ipc_collect()
+            accelerator.empty_cache()
         if self._expert_transfer_plan:
             self._update_expert_weights(megatron_local_weights)
 
@@ -451,8 +452,7 @@ def _send_to_colocated_engine(
     if dist.get_rank() == ipc_gather_src:
         if any(info is None for info in gathered_infos):
             raise RuntimeError(f"Missing IPC payloads in slot {ipc_gather_src}; got {gathered_infos!r}")
-        rank_local_infos = [info if info["names"] else None for info in gathered_infos]
-        if any(info is not None for info in rank_local_infos):
-            refs.append(ipc_engine.update_weights.remote(rank_local_infos))
+        if any(info["names"] for info in gathered_infos):
+            refs.append(ipc_engine.update_weights.remote(gathered_infos))
 
     return refs, weight_ref

@@ -64,11 +64,11 @@ steps:
         python:3.11 bash -c '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil wandb
           pip install -q -e . --no-deps
           python tests/test_megatron_argument_validation.py
           python tests/test_value_temperature.py
-          python tests/test_rollout_validation.py
+          python tests/test_docs_consistency.py
           python tests/test_placement_group.py
           python tests/test_external_vllm_engines.py
           python tests/plugin_contracts/test_plugin_rollout_contracts.py
@@ -114,7 +114,7 @@ steps:
         python:3.11 bash -c '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard wandb
           pip install -q openai openai-agents anthropic
           pip install -q -e . --no-deps
           python tests/test_agent/test_adapters.py
@@ -145,6 +145,7 @@ steps:
           pip install -q -e . --no-deps --break-system-packages
           for test_file in \
             tests/test_advantage_whiten_cp.py \
+            tests/test_accelerator.py \
             tests/test_block_fp8_zero_block.py \
             tests/test_deep_ep_tms_patch.py \
             tests/test_discounted_returns.py \
@@ -158,19 +159,22 @@ steps:
             tests/test_layerwise_alignment.py \
             tests/test_model_provider_freeze.py \
             tests/test_policy_loss.py \
+            tests/test_ppo_kl_metric.py \
             tests/test_process_rollout_data.py \
             tests/test_qwen3_5_vl_native.py \
             tests/test_qwen3_linear_attention_cu_seqlens.py \
             tests/test_read_file_slicing.py \
             tests/test_reloadable_process_group_world.py \
+            tests/test_rollout_data_utils.py \
             tests/test_rollout_metrics.py \
-            tests/test_rollout_routing_replay_validation.py \
             tests/test_rollout_sample_hooks.py \
             tests/test_vllm_rollout.py \
             tests/test_agent/test_sandbox_exec_and_wait.py \
             tests/test_stateless_adam.py \
             tests/test_tau_bench_token_delta.py \
-            tests/test_train_dump.py; do
+            tests/test_train_data_utils.py \
+            tests/test_update_weight_factory.py \
+            tests/observability/test_trace_utils.py; do
             python -m pytest "$$test_file"
           done
         '

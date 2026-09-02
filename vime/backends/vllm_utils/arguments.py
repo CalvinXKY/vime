@@ -1,10 +1,13 @@
 import argparse
+import logging
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_router.launch_router import RouterArgs
 
 from vime.utils.http_utils import _wrap_ipv6
+
+logger = logging.getLogger(__name__)
 
 
 def add_vllm_router_arguments(parser):
@@ -99,7 +102,7 @@ def add_vllm_arguments(parser):
     parser.add_argument = _wrap_add_argument(old_add_argument)
     parser.add_argument_group = patched_add_argument_group
     AsyncEngineArgs.add_cli_args(parser)
-    from vllm.entrypoints.openai.cli_args import FrontendArgs
+    from vllm.entrypoints.launchers.cli_args import FrontendArgs
 
     FrontendArgs.add_cli_args(parser)
     parser.add_argument = old_add_argument

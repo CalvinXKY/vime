@@ -5,8 +5,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from vime.utils.trace_utils import TRACE_CHILDREN_KEY, build_vllm_meta_trace_attrs, trace_span
+from vime.observability.trace_utils import TRACE_CHILDREN_KEY, build_vllm_meta_trace_attrs, trace_span
 from vime.utils.types import Sample
+
+NUM_GPUS = 0
 
 
 def _load_trace_timeline_viewer_module():
@@ -24,17 +26,17 @@ def _load_trace_timeline_viewer_module():
 
 @pytest.mark.unit
 def test_build_vllm_meta_trace_attrs_keeps_standard_and_pd_fields():
-    attrs = build_vllm_meta_trace_attrs(
-        {
-            "prompt_tokens": 12,
-            "completion_tokens": 7,
-            "cached_tokens": 3,
-            "pd_prefill_forward_duration": 0.125,
-            "pd_decode_transfer_duration": 0.05,
-            "finish_reason": {"type": "stop"},
-            "unused_field": "ignored",
-        }
-    )
+    meta = {
+        "prompt_tokens": 12,
+        "completion_tokens": 7,
+        "cached_tokens": 3,
+        "pd_prefill_forward_duration": 0.125,
+        "pd_decode_transfer_duration": 0.05,
+        "finish_reason": {"type": "stop"},
+        "unused_field": "ignored",
+    }
+
+    attrs = build_vllm_meta_trace_attrs(meta)
     trace_children = attrs.pop(TRACE_CHILDREN_KEY)
 
     assert attrs == {
@@ -44,23 +46,12 @@ def test_build_vllm_meta_trace_attrs_keeps_standard_and_pd_fields():
         "finish_reason": "stop",
     }
     assert trace_children[0]["name"] == "vllm_pd_prefill"
-    assert trace_children[0]["children"][0]["attrs"] == {"pd_prefill_forward_duration": 0.125}
+    assert trace_children[0]["children"][0]["attrs"] == {
+        "pd_prefill_forward_duration": 0.125,
+    }
     assert trace_children[1]["name"] == "vllm_pd_decode"
-    assert trace_children[1]["children"][0]["attrs"] == {"pd_decode_transfer_duration": 0.05}
-
-
-@pytest.mark.unit
-def test_build_vllm_meta_trace_attrs_reads_native_response_shape():
-    assert build_vllm_meta_trace_attrs(
-        {
-            "choices": [{"finish_reason": "length"}],
-            "usage": {"prompt_tokens": 12, "completion_tokens": 7, "cached_tokens": 3},
-        }
-    ) == {
-        "prompt_tokens": 12,
-        "completion_tokens": 7,
-        "cached_tokens": 3,
-        "finish_reason": "length",
+    assert trace_children[1]["children"][0]["attrs"] == {
+        "pd_decode_transfer_duration": 0.05,
     }
 
 
@@ -71,12 +62,14 @@ def test_trace_timeline_viewer_omits_virtual_pd_lanes_without_pd_attrs(tmp_path:
 
     with trace_span(sample, "vllm_generate", attrs={"max_new_tokens": 8}) as span:
         span.update(
-            {
-                "prompt_tokens": 4,
-                "completion_tokens": 2,
-                "cached_tokens": 1,
-                "finish_reason": "stop",
-            }
+            build_vllm_meta_trace_attrs(
+                {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 2,
+                    "cached_tokens": 1,
+                    "finish_reason": {"type": "stop"},
+                }
+            )
         )
 
     pt_path = tmp_path / "rollout.pt"
@@ -100,3 +93,7 @@ def test_trace_timeline_viewer_omits_virtual_pd_lanes_without_pd_attrs(tmp_path:
     }
     assert "[P]" not in item["name"]
     assert "[D]" not in item["name"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))

@@ -6,6 +6,8 @@ import pytest
 
 from vime.utils import reloadable_process_group as rpg
 
+NUM_GPUS = 0
+
 
 @pytest.mark.unit
 def test_selected_comm_ops_skip_memory_check():
@@ -87,7 +89,7 @@ def test_register_default_process_group_captures_rendezvous_state(monkeypatch):
     assert state.store == "rendezvous-store"
     assert state.rank == 3
     assert state.world_size == 8
-    assert not state.nccl_world_destroyed
+    assert not state.accelerator_world_destroyed
 
 
 @pytest.mark.unit
@@ -131,7 +133,7 @@ def test_world_and_subgroups_follow_destroy_reload_order(monkeypatch):
 
     rpg.destroy_process_groups()
 
-    assert state.nccl_world_destroyed
+    assert state.accelerator_world_destroyed
     assert state.generation == 1
     assert events == [
         ("barrier", "canonical-gloo"),
@@ -154,7 +156,7 @@ def test_world_and_subgroups_follow_destroy_reload_order(monkeypatch):
     events.clear()
     rpg.reload_process_groups()
 
-    assert not state.nccl_world_destroyed
+    assert not state.accelerator_world_destroyed
     assert state.generation == 2
     assert events == [
         ("barrier", "WORLD"),

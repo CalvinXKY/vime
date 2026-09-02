@@ -34,6 +34,7 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
   - [快速开始](#快速开始)
     - [Agentic RL 示例](#agentic-rl-示例)
   - [参数说明](#参数说明)
+  - [代码阅读路径](#代码阅读路径)
   - [开发指南](#开发指南)
   - [slime doc](#slime-doc)
   - [FAQ](#faq)
@@ -79,6 +80,23 @@ Vime 的参数分为三类：
 `--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 tensor parallel size。默认 rollout 入口为 `vime.rollout.vllm_rollout.generate_rollout`。
 
 完整使用说明请查阅 [使用文档](docs/zh/get_started/usage.md)。
+
+## 代码阅读路径
+
+建议从训练主循环开始，只在需要时继续深入：
+
+```text
+train.py: train
+├─ vime/ray/placement_group.py       Ray 资源与 worker 初始化
+├─ vime/ray/rollout.py              RolloutManager.generate：rollout 编排
+│  └─ vime/rollout/vllm_rollout.py  样本生成与奖励计算
+└─ vime/ray/actor_group.py          RayTrainGroup.async_train：训练调度
+   └─ vime/backends/megatron_utils/actor.py
+      ├─ model.py                    Megatron 模型执行
+      └─ loss.py                     RL loss 与 advantage
+```
+
+第一次阅读时，可以把 `vime/utils/arguments.py` 当作配置入口。只有需要修改相关区域时，再深入 `vime/backends/vllm_utils/` 的部署细节和 `vime/backends/megatron_utils/update_weight/` 下的权重同步实现。
 
 ## 开发指南
 

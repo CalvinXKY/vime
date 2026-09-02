@@ -34,6 +34,7 @@ from typing import Any
 
 import numpy as np
 
+from vime.observability.trace_utils import build_vllm_meta_trace_attrs, trace_span
 from vime.rollout.vllm_rollout import (
     GenerateState,
     _align_mm_feature_placeholders_to_tokens,
@@ -45,7 +46,6 @@ from vime.rollout.vllm_rollout import (
 )
 from vime.utils import http_utils
 from vime.utils.processing_utils import build_multimodal_messages, build_processor_kwargs
-from vime.utils.trace_utils import build_vllm_meta_trace_attrs, trace_span
 from vime.utils.types import Sample
 
 __all__ = ["generate_streaming"]

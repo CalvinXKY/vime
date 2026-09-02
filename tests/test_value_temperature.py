@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import types
 from argparse import Namespace
@@ -7,6 +8,27 @@ import torch
 
 
 NUM_GPUS = 0
+
+
+def test_opd_teacher_uses_rollout_temperature(monkeypatch):
+    from vime.rollout import on_policy_distillation
+
+    captured = {}
+
+    async def fake_post(url, payload):
+        captured.update(url=url, payload=payload)
+        return {"prompt_logprobs": []}
+
+    monkeypatch.setattr(on_policy_distillation, "post", fake_post)
+    args = Namespace(
+        rm_url="http://teacher:8000/inference/v1/generate",
+        rollout_temperature=0.7,
+    )
+    sample = Namespace(tokens=[1, 2], multimodal_inputs=None)
+
+    asyncio.run(on_policy_distillation.reward_func(args, sample))
+
+    assert captured["payload"]["sampling_params"]["temperature"] == 0.7
 
 
 def test_get_values_does_not_apply_rollout_temperature(monkeypatch):

@@ -14,7 +14,8 @@ from vime.backends.megatron_utils.arguments import set_default_megatron_args
 from vime.backends.megatron_utils.hf_to_megatron import load_hf_weights
 from vime.backends.megatron_utils.initialize import init
 from vime.backends.megatron_utils.model_provider import get_model_provider_func
-from vime.utils.logging_utils import configure_logger
+from vime.observability.logging_utils import configure_logger
+from vime.utils import accelerator
 from vime.utils.memory_utils import print_memory
 
 
@@ -98,17 +99,17 @@ def main():
     local_rank = int(os.getenv("LOCAL_RANK") or os.getenv("SLURM_LOCALID") or 0)
     global_rank = int(os.getenv("RANK") or os.getenv("SLURM_PROCID") or 0)
 
-    torch.cuda.set_device(local_rank)
+    accelerator.set_device(local_rank)
     os.environ.setdefault("WORLD_SIZE", str(world_size))
     os.environ.setdefault("RANK", str(global_rank))
     os.environ.setdefault("LOCAL_RANK", str(local_rank))
     os.environ.setdefault("MASTER_ADDR", "localhost")
     os.environ.setdefault("MASTER_PORT", "12355")
     dist.init_process_group(
-        backend="nccl",
+        backend=accelerator.process_group_backend(),
         world_size=world_size,
         rank=global_rank,
-        device_id=torch.device(f"cuda:{local_rank}"),
+        device_id=accelerator.distributed_device_id(local_rank),
     )
     args = get_args()
     init(args)
@@ -124,9 +125,9 @@ def main():
         model[0] = model[0].cpu()
 
     print_memory("after loading model")
-    torch.cuda.synchronize()
+    accelerator.synchronize()
     gc.collect()
-    torch.cuda.empty_cache()
+    accelerator.empty_cache()
 
     save_checkpoint(1, model, None, None, 0)
 

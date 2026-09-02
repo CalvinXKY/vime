@@ -16,6 +16,7 @@ import vllm_router  # noqa: F401 — ensures vllm-router is importable on startu
 from tqdm import tqdm
 
 from vime.backends.vllm_utils.server_control import abort_inflight_requests
+from vime.observability.trace_utils import build_vllm_meta_trace_attrs, trace_function, trace_span
 from vime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from vime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter, should_drop_dynamic_filter_output
 from vime.rollout.sample_hooks import apply_rollout_sample_hooks
@@ -30,7 +31,6 @@ from vime.utils.processing_utils import (
     load_processor,
     load_tokenizer,
 )
-from vime.utils.trace_utils import build_vllm_meta_trace_attrs, trace_function, trace_span
 from vime.utils.types import Sample
 
 from .rm_hub import async_rm, batched_async_rm

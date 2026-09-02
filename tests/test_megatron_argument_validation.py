@@ -1,3 +1,4 @@
+import argparse
 import importlib.util
 import sys
 import types
@@ -43,7 +44,7 @@ def load_vime_arguments_module(monkeypatch):
     router_launch_mod = types.ModuleType("vllm_router.launch_router")
     vllm_arguments_mod = types.ModuleType("vime.backends.vllm_utils.arguments")
     vllm_external_mod = types.ModuleType("vime.backends.vllm_utils.external")
-    logging_utils_mod = types.ModuleType("vime.utils.logging_utils")
+    logging_utils_mod = types.ModuleType("vime.observability.logging_utils")
 
     router_launch_mod.RouterArgs = object
     vllm_arguments_mod.vllm_parse_args = lambda *args, **kwargs: None
@@ -55,7 +56,7 @@ def load_vime_arguments_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "vllm_router.launch_router", router_launch_mod)
     monkeypatch.setitem(sys.modules, "vime.backends.vllm_utils.arguments", vllm_arguments_mod)
     monkeypatch.setitem(sys.modules, "vime.backends.vllm_utils.external", vllm_external_mod)
-    monkeypatch.setitem(sys.modules, "vime.utils.logging_utils", logging_utils_mod)
+    monkeypatch.setitem(sys.modules, "vime.observability.logging_utils", logging_utils_mod)
 
     module_path = Path(__file__).resolve().parents[1] / "vime" / "utils" / "arguments.py"
     module_name = "test_vime_argument_validation_module"
@@ -257,6 +258,7 @@ def make_vime_validate_args(**overrides):
         update_weight_disk_dir=None,
         update_weight_local_checkpoint_dir=None,
         update_weight_mode="full",
+        rollout_temperature=1.0,
     )
     values.update(overrides)
     return types.SimpleNamespace(**values)
@@ -305,6 +307,16 @@ def test_vime_validate_args_rejects_equal_debug_data_paths(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="--save-debug-train-data must not be equal"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("temperature", [0.0, -0.1])
+def test_vime_validate_args_rejects_non_positive_rollout_temperature(monkeypatch, temperature):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(rollout_temperature=temperature)
+
+    with pytest.raises(ValueError, match="--rollout-temperature must be > 0"):
         module.vime_validate_args(args)
 
 
@@ -403,6 +415,19 @@ def test_update_weight_delta_requires_local_checkpoint_dir(monkeypatch):
 
     with pytest.raises(ValueError, match="requires --update-weight-local-checkpoint-dir"):
         module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_force_fp8_ue8m0_scale_argument(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    parser = argparse.ArgumentParser()
+    module.get_vime_extra_args_provider()(parser)
+
+    defaults = parser.parse_args(["--rollout-batch-size", "1"])
+    configured = parser.parse_args(["--rollout-batch-size", "1", "--force-fp8-ue8m0-scale"])
+
+    assert defaults.force_fp8_ue8m0_scale is False
+    assert configured.force_fp8_ue8m0_scale is True
 
 
 if __name__ == "__main__":
