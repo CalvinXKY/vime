@@ -62,11 +62,6 @@ RUN git -C /vllm-workspace/vllm-ascend apply --check --whitespace=nowarn \
     git -C /vllm-workspace/vllm-ascend apply --whitespace=nowarn \
       /opt/npu_patch/vllm-ascend.patch
 
-RUN git -C /vllm-workspace/vllm-ascend apply --check --whitespace=nowarn \
-      /opt/npu_patch/vllm-ascend-qwen35.patch && \
-    git -C /vllm-workspace/vllm-ascend apply --whitespace=nowarn \
-      /opt/npu_patch/vllm-ascend-qwen35.patch
-
 # Protect the serving stack while installing Vime dependencies.
 RUN python3 -c 'import importlib.metadata as m; names = ["numpy", "ray", "torch", "torch-npu", "torchvision", "transformers", "triton-ascend", "vllm", "vllm-ascend"]; open("/tmp/vime-npu-constraints.txt", "w").write("\n".join(f"{name}=={m.version(name)}" for name in names) + "\n")'
 

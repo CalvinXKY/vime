@@ -470,3 +470,92 @@ index 6d99ac76a..b7df4df22 100644
 
          # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
          # set, so its worker-side consumer must use the same condition. Keep the
+diff --git a/vllm_ascend/device/device_op.py b/vllm_ascend/device/device_op.py
+index 7205dd1..f49be97 100644
+--- a/vllm_ascend/device/device_op.py
++++ b/vllm_ascend/device/device_op.py
+@@ -40,12 +40,14 @@ else:
+ class BaseDeviceAdaptor:
+     @classmethod
+     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
++        if key.numel() == 0:
++            return
+         torch_npu.npu_scatter_pa_kv_cache(
+             key=key.contiguous(),
+             value=value.contiguous(),
+             key_cache=key_cache,
+             value_cache=value_cache,
+-            slot_mapping=slot_mapping.contiguous(),
++            slot_mapping=slot_mapping.to(dtype=torch.int32).contiguous(),
+             cache_mode="Norm",
+         )
+ 
+diff --git a/vllm_ascend/ops/causal_conv1d.py b/vllm_ascend/ops/causal_conv1d.py
+index bcfd117..ef8b151 100644
+--- a/vllm_ascend/ops/causal_conv1d.py
++++ b/vllm_ascend/ops/causal_conv1d.py
+@@ -35,11 +35,14 @@ def causal_conv1d_ref(
+     seqlen = x.shape[-1]
+     dim, width = weight.shape
+ 
++    # F.conv1d performs cross-correlation; flip the kernel to get true
++    # causal convolution matching fla.ShortConvolution semantics.
++    flipped_weight = weight.flip(-1).unsqueeze(1)
+     if initial_states is None:
+-        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
++        out = F.conv1d(x, flipped_weight, bias, padding=width - 1, groups=dim)
+     else:
+         x = torch.cat([initial_states, x], dim=-1)
+-        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
++        out = F.conv1d(x, flipped_weight, bias, padding=0, groups=dim)
+     out = out[..., :seqlen]
+ 
+     if return_final_states:
+diff --git a/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py b/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py
+index a984174..07a57ff 100644
+--- a/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py
++++ b/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py
+@@ -14,6 +14,7 @@ def _compute_slot_mappings_kernel(
+     block_table_ptrs,
+     block_table_strides,
+     block_sizes,
++    kernel_block_sizes,
+     slot_mappings_ptr,
+     slot_mappings_stride,
+     cp_rank,
+@@ -37,6 +38,7 @@ def _compute_slot_mappings_kernel(
+     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
+     block_table_stride = tl.load(block_table_strides + group_id)
+     block_size = tl.load(block_sizes + group_id)
++    kernel_block_size = tl.load(kernel_block_sizes + group_id)
+     req_state_idx = tl.load(idx_mapping + batch_idx)
+     start_idx = tl.load(query_start_loc + batch_idx)
+     end_idx = tl.load(query_start_loc + batch_idx + 1)
+@@ -62,13 +64,13 @@ def _compute_slot_mappings_kernel(
+         block_numbers = tl.gather(block_table_values, block_indices, 0).to(tl.int32)
+ 
+         if CP_SIZE == 1:
+-            slot_ids = block_numbers * block_size + block_offsets
++            slot_ids = block_numbers * kernel_block_size + block_offsets
+         else:
+             is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+             rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
+             remainder = block_offsets % CP_INTERLEAVE
+             local_offsets = rounds * CP_INTERLEAVE + remainder
+-            slot_ids = block_numbers * block_size + local_offsets
++            slot_ids = block_numbers * kernel_block_size + local_offsets
+             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+ 
+         tl.store(slot_mapping_ptr + offset, slot_ids, mask=valid)
+diff --git a/vllm_ascend/worker/v2/block_table.py b/vllm_ascend/worker/v2/block_table.py
+index dd559f3..2e7ece1 100644
+--- a/vllm_ascend/worker/v2/block_table.py
++++ b/vllm_ascend/worker/v2/block_table.py
+@@ -92,6 +92,7 @@ class AscendBlockTables(BlockTables):
+             self.block_table_ptrs,
+             self.block_table_strides,
+             self.block_sizes_tensor,
++            self.kernel_block_sizes_tensor,
+             slot_mappings,
+             slot_mappings.stride(0),
+             self.cp_rank,

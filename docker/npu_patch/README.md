@@ -54,9 +54,6 @@ git -C /vllm-workspace/vllm apply "${PATCH_DIR}/vllm.patch"
 
 git -C /vllm-workspace/vllm-ascend apply --check "${PATCH_DIR}/vllm-ascend.patch"
 git -C /vllm-workspace/vllm-ascend apply "${PATCH_DIR}/vllm-ascend.patch"
-
-git -C /vllm-workspace/vllm-ascend apply --check "${PATCH_DIR}/vllm-ascend-qwen35.patch"
-git -C /vllm-workspace/vllm-ascend apply "${PATCH_DIR}/vllm-ascend-qwen35.patch"
 ```
 
 ### 2. Megatron-LM
