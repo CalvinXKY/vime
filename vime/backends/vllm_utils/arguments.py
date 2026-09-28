@@ -10,6 +10,20 @@ from vime.utils.http_utils import _wrap_ipv6
 logger = logging.getLogger(__name__)
 
 
+def vllm_cli_args():
+    """Return the vLLM serve CLI module.
+
+    Newer vLLM keeps these symbols in ``entrypoints.launchers``. The published
+    NPU image is still on the older ``entrypoints.openai`` location.
+    """
+    try:
+        from vllm.entrypoints.launchers import cli_args
+    except ImportError:
+        from vllm.entrypoints.openai import cli_args
+
+    return cli_args
+
+
 def add_vllm_router_arguments(parser):
     parser.add_argument(
         "--vllm-router-ip",
@@ -102,9 +116,7 @@ def add_vllm_arguments(parser):
     parser.add_argument = _wrap_add_argument(old_add_argument)
     parser.add_argument_group = patched_add_argument_group
     AsyncEngineArgs.add_cli_args(parser)
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
-
-    FrontendArgs.add_cli_args(parser)
+    vllm_cli_args().FrontendArgs.add_cli_args(parser)
     parser.add_argument = old_add_argument
     parser.add_argument_group = old_add_argument_group
 
