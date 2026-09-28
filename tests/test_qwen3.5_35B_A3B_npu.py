@@ -58,13 +58,16 @@ def execute(torch_dist_checkpoint=None):
             f"--hf-checkpoint {model_dir} --ref-load {shlex.quote(torch_dist_checkpoint)} --no-load-optim "
         )
 
-    # Responses stay within 1024 tokens. Past that point the current serving
-    # path diverges from Megatron, and --ci-test rejects the logprob gap.
+    # The verified 1024-token control used enable_thinking=false. The chat
+    # template otherwise opens a <think> block, and --ci-test rejects a mean
+    # logprob at or below -1 and an entropy outside (0, 1). Responses also
+    # stay within 1024 tokens: past that point serving diverges from Megatron.
     rollout_args = (
         f"--prompt-data {prompt_data} "
         "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
+        "--apply-chat-template-kwargs '{\"enable_thinking\": false}' "
         "--rollout-shuffle "
         "--rm-type deepscaler "
         "--num-rollout 2 "
@@ -87,8 +90,7 @@ def execute(torch_dist_checkpoint=None):
         "--recompute-granularity full "
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
-        "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 8192 "
+        "--max-tokens-per-gpu 6144 "
         "--micro-batch-size 1 "
     )
 
