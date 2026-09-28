@@ -531,9 +531,17 @@ index a984174..07a57ff 100644
      req_state_idx = tl.load(idx_mapping + batch_idx)
      start_idx = tl.load(query_start_loc + batch_idx)
      end_idx = tl.load(query_start_loc + batch_idx + 1)
-@@ -62,13 +64,13 @@ def _compute_slot_mappings_kernel(
+@@ -58,16 +60,16 @@ def _compute_slot_mappings_kernel(
+         positions = tl.load(pos + offset, mask=valid, other=0).to(tl.int32)
+-        block_indices = positions // (block_size * CP_SIZE)
+-        # block_offset = positions % (block_size * CP_SIZE). Replacing the
++        block_indices = positions // (kernel_block_size * CP_SIZE)
++        # block_offset = positions % (kernel_block_size * CP_SIZE). Replacing the
+         # remainder with multiply/subtract avoids scalar fallback on Ascend.
+-        block_offsets = positions - (block_size * CP_SIZE) * block_indices
++        block_offsets = positions - (kernel_block_size * CP_SIZE) * block_indices
          block_numbers = tl.gather(block_table_values, block_indices, 0).to(tl.int32)
- 
+
          if CP_SIZE == 1:
 -            slot_ids = block_numbers * block_size + block_offsets
 +            slot_ids = block_numbers * kernel_block_size + block_offsets
