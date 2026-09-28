@@ -126,11 +126,12 @@ def execute(torch_dist_checkpoint=None):
         "--use-precision-aware-optimizer "
     )
 
+    # Match the running non-colocate job: rollout is TP 2 only. Enabling vLLM
+    # expert parallel puts 128 local experts on each engine and the MoE dispatch
+    # window exceeds the default 200MB HCCL buffer, so the engine never starts.
     vllm_args = (
         "--vllm-additional-config '{\"weight_nz_mode\":0}' "
         "--rollout-num-gpus-per-engine 2 "
-        "--vllm-enable-sleep-mode "
-        "--vllm-enable-expert-parallel "
         "--vllm-gpu-memory-utilization 0.7 "
     )
 
@@ -170,9 +171,6 @@ def execute(torch_dist_checkpoint=None):
         extra_env_vars={
             "DISABLE_L2_CACHE": "1",
             "VLLM_USE_AOT_COMPILE": "0",
-            # Rollout EP is 2 GPUs and 128 local experts. The MoE dispatch window
-            # needs 297MB; the CANN default of 200MB aborts engine startup.
-            "HCCL_BUFFSIZE": "512",
         },
     )
 
