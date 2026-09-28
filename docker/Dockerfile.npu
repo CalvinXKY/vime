@@ -113,6 +113,10 @@ RUN pip install \
       --requirement /root/vime/requirements.txt && \
     pip install --no-deps --no-build-isolation -e /root/vime
 
+# Qwen3.5 GDN layers import fla.ShortConvolution at init. Do not use the npu
+# extra: it pins a different torch / torch_npu than this image.
+RUN pip install --no-deps einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'
+
 # Vime currently imports torch_memory_saver from its training actor.
 RUN git clone --depth 1 --branch 2026.6.0 \
       https://github.com/sgl-project/sgl-kernel-npu.git /root/sgl-kernel-npu && \

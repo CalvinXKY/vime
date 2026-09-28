@@ -19,6 +19,14 @@ def prepare(torch_dist_ref_load=True):
     model_dir = shlex.quote(MODEL_DIR)
     dataset_dir = shlex.quote(DATASET_DIR)
 
+    # The published NPU image does not install flash-linear-attention. Qwen3.5
+    # GDN layers instantiate fla.ShortConvolution while the checkpoint is built.
+    # Pin the version used by the verified NPU run, and skip extras so pip does
+    # not replace the image's torch / torch_npu.
+    U.exec_command(
+        f"{shlex.quote(sys.executable)} -m pip install --disable-pip-version-check --no-deps "
+        "einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'"
+    )
     U.exec_command(f"mkdir -p {models_dir} {datasets_dir}")
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {model_dir}")
     U.exec_command("hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {dataset_dir}")
@@ -27,6 +35,8 @@ def prepare(torch_dist_ref_load=True):
 
     checkpoint_path = Path(tempfile.mkdtemp(prefix=f"{MODEL_NAME}_torch_dist_", dir=f"{TEST_ROOT}/models"))
     checkpoint_dir = shlex.quote(str(checkpoint_path))
+    # Keep tensor parallel at 1. The converter then pipeline-splits the 40 layers
+    # across the 8 NPUs. TP 2 with PP 1 builds every layer on each device.
     U.exec_command(
         "source scripts/models/qwen3.5-35B-A3B.sh && "
         "TRANSFORMERS_VERBOSITY=error "
