@@ -170,6 +170,9 @@ def execute(torch_dist_checkpoint=None):
         extra_env_vars={
             "DISABLE_L2_CACHE": "1",
             "VLLM_USE_AOT_COMPILE": "0",
+            # Rollout EP is 2 GPUs and 128 local experts. The MoE dispatch window
+            # needs 297MB; the CANN default of 200MB aborts engine startup.
+            "HCCL_BUFFSIZE": "512",
         },
     )
 
