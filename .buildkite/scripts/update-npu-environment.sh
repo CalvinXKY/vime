@@ -144,22 +144,94 @@ revert_series() {
     done
 }
 
+# Swap one installed patch. If the checkout's patch does not apply on this
+# image, put the image patch back so the rest of the series can still run.
+swap_patch() {
+    local target="$1"
+    local old_patch="$2"
+    local new_patch="$3"
+    local label
+
+    label="$(basename "$new_patch")"
+    echo "INFO: Reverting $(basename "$old_patch") from $target"
+    git -C "$target" apply --reverse --whitespace=nowarn "$old_patch"
+    if git -C "$target" apply --check --whitespace=nowarn "$new_patch"; then
+        echo "INFO: Applying $label to $target"
+        git -C "$target" apply --whitespace=nowarn "$new_patch"
+        return
+    fi
+    echo "WARNING: $label does not apply on this image; keeping the image patch" >&2
+    git -C "$target" apply --whitespace=nowarn "$old_patch"
+}
+
 reconcile_series() {
     local old_series="$1"
     local old_root="$2"
     local new_series="$3"
     local new_root="$4"
-    local old_digest new_digest
+    local entry target image_patch source_patch key old_path new_path
+    local -a old_entries new_entries changed_keys
+    local -A old_source_by_key new_source_by_key
 
-    old_digest=$(series_digest "$old_series" "$old_root" image)
-    new_digest=$(series_digest "$new_series" "$new_root" source)
-    if [ "$old_digest" = "$new_digest" ]; then
+    if [ "$(series_digest "$old_series" "$old_root" image)" = "$(series_digest "$new_series" "$new_root" source)" ]; then
         echo "INFO: Patch series is unchanged"
         return
     fi
 
-    revert_series "$old_series" "$old_root"
-    apply_series "$new_series" "$new_root"
+    # The default image can lag the branch. Replaying every patch then fails on
+    # files the image vllm does not have. Update only the same installed patch
+    # whose bytes changed, and keep the image copy when the new one does not apply.
+    load_series "$old_series"
+    old_entries=("${SERIES_ENTRIES[@]}")
+    load_series "$new_series"
+    new_entries=("${SERIES_ENTRIES[@]}")
+
+    for entry in "${old_entries[@]}"; do
+        IFS='|' read -r target image_patch source_patch <<< "$entry"
+        key="${target}|${image_patch}"
+        old_source_by_key["$key"]="${old_root}/${image_patch}"
+    done
+    for entry in "${new_entries[@]}"; do
+        IFS='|' read -r target image_patch source_patch <<< "$entry"
+        key="${target}|${image_patch}"
+        new_source_by_key["$key"]="${new_root}/${source_patch}"
+    done
+
+    changed_keys=()
+    for entry in "${old_entries[@]}"; do
+        IFS='|' read -r target image_patch source_patch <<< "$entry"
+        key="${target}|${image_patch}"
+        new_path="${new_source_by_key[$key]:-}"
+        if [ -z "$new_path" ]; then
+            echo "WARNING: Image patch $image_patch is not in the checkout series; leaving it applied" >&2
+            continue
+        fi
+        if [ "$(sha256_file "${old_source_by_key[$key]}")" = "$(sha256_file "$new_path")" ]; then
+            continue
+        fi
+        changed_keys+=("$key")
+    done
+
+    # Reverse series order matches revert_series, so later patches come off first.
+    local i
+    for ((i=${#changed_keys[@]}-1; i>=0; i--)); do
+        key="${changed_keys[$i]}"
+        target="${key%%|*}"
+        old_path="${old_source_by_key[$key]}"
+        new_path="${new_source_by_key[$key]}"
+        validate_series_entry "$target" "$old_path"
+        validate_series_entry "$target" "$new_path"
+        swap_patch "$target" "$old_path" "$new_path"
+    done
+
+    for entry in "${new_entries[@]}"; do
+        IFS='|' read -r target image_patch source_patch <<< "$entry"
+        key="${target}|${image_patch}"
+        if [ -n "${old_source_by_key[$key]:-}" ]; then
+            continue
+        fi
+        echo "WARNING: Checkout patch $source_patch is not installed in this image; skipping it" >&2
+    done
 }
 
 update_vime_code() {
