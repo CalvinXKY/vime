@@ -8,10 +8,9 @@ def get_deepscaler_rule_based_reward(response, label):
     if "</think>" in response:
         model_solution = response.split("</think>")[-1]
     elif "<|im_end|>" in response:
-        # enable_thinking=false ends the turn here and separates with a blank line.
+        # enable_thinking=false ends the turn here. Grade the whole span so a
+        # later explanation does not drop an earlier \boxed answer.
         model_solution = response.split("<|im_end|>", 1)[0]
-        if "\n\n" in model_solution:
-            model_solution = model_solution.split("\n\n", 1)[-1]
     elif "###Response" in response:
         model_solution = response.split("###Response", 1)[1]
     else:

@@ -50,6 +50,13 @@ def test_im_end_without_think_grades_the_solution():
 
 
 @pytest.mark.unit
+def test_im_end_keeps_boxed_answer_before_a_later_explanation():
+    """A blank line after the answer must not discard the boxed solution."""
+    response = "###Response\\boxed{42}\n\nExplanation.<|im_end|>"
+    assert get_deepscaler_rule_based_reward(response, "42") == 1
+
+
+@pytest.mark.unit
 def test_think_marker_is_used_when_im_end_is_also_present():
     """A thinking reply contains both markers. Grade the tail after ``</think>``."""
     response = "draft \\boxed{1}</think>\n\\boxed{42}<|im_end|>"
