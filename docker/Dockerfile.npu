@@ -79,7 +79,8 @@ RUN git clone https://gitcode.com/Ascend/MegatronAdaptor.git /root/MegatronAdapt
 
 # Apply NPU training-stack patches from the build-context snapshot.
 # The NPU Megatron patch is based on the common Vime Megatron patch, so the
-# common patch must be applied first.
+# common patch must be applied first. fla 0.5.2 supplies the GDN kernels;
+# the adaptor torch stand-in rejects residual and must stay disabled.
 RUN git -C /root/Megatron-LM apply --check --whitespace=nowarn \
       /opt/npu_patch/megatron-common.patch && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
@@ -89,7 +90,11 @@ RUN git -C /root/Megatron-LM apply --check --whitespace=nowarn \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
       /opt/npu_patch/megatron.patch && \
     git -C /root/MindSpeed apply --whitespace=nowarn \
-      /opt/npu_patch/mindspeed.patch
+      /opt/npu_patch/mindspeed.patch && \
+    git -C /root/MegatronAdaptor apply --check --whitespace=nowarn \
+      /opt/npu_patch/megatron-adaptor.patch && \
+    git -C /root/MegatronAdaptor apply --whitespace=nowarn \
+      /opt/npu_patch/megatron-adaptor.patch
 
 RUN pip install --constraint /tmp/vime-npu-constraints.txt --no-build-isolation \
       "nvidia-modelopt==0.46.0" "nvdlfw-inspect==0.2.2" && \
@@ -112,6 +117,10 @@ RUN pip install \
       --constraint /tmp/vime-npu-constraints.txt \
       --requirement /root/vime/requirements.txt && \
     pip install --no-deps --no-build-isolation -e /root/vime
+
+# Qwen3.5 GDN layers import fla.ShortConvolution at init. Do not use the npu
+# extra: it pins a different torch / torch_npu than this image.
+RUN pip install --no-deps einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'
 
 # Vime currently imports torch_memory_saver from its training actor.
 RUN git clone --depth 1 --branch 2026.6.0 \
